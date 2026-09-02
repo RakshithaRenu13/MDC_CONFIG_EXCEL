@@ -1029,31 +1029,21 @@ base_df = pd.DataFrame(
     selected_solution_items
 )
 
-display_base_df = base_df.copy()
-
-display_base_df[
-    "Unit Price"
-] = display_base_df[
-    "Unit Price"
-].apply(
-    format_price
-)
-
-display_base_df[
-    "Amount"
-] = display_base_df[
-    "Amount"
-].apply(
-    format_price
-)
+# Display only the required columns
+display_base_df = base_df[
+    [
+        "Part Number",
+        "Description",
+        "Qty",
+        "UOM"
+    ]
+].copy()
 
 st.dataframe(
     display_base_df,
     use_container_width=True,
     hide_index=True
 )
-
-
 # ============================================================
 # BASE COST
 # ============================================================
