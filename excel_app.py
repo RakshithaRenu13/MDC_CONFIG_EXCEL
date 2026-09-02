@@ -1,1023 +1,1026 @@
 import streamlit as st
 import pandas as pd
+import requests
 from io import BytesIO
-import re
-import math
+from pathlib import Path
+import openpyxl
+
+# ============================================================
+# MDC CONFIGURATOR
+# Excel-driven Single Rack MDC database
+#
+# Put the Excel workbook in the same folder as this app:
+# 1 Rack SKU'S - MDC BOQ (01.09.2026).xlsx
+#
+# The application reads the workbook every time Streamlit
+# starts/reloads, so changes to the Excel database can flow
+# into the UI without manually rewriting the BOM database.
+# ============================================================
 
 st.set_page_config(
-    page_title="Eaton MDC Configuration & BOM Generator",
-    page_icon="⚡",
-    layout="wide",
+    page_title="MDC Configuration & BOM Generator",
+    page_icon="🏭",
+    layout="wide"
 )
 
-# ============================================================
-# HELPERS
-# ============================================================
+EXCEL_FILENAME = "1 Rack SKU'S - MDC BOQ (01.09.2026).xlsx"
+EXCEL_PATH = Path(__file__).resolve().parent / EXCEL_FILENAME
 
-CANONICAL_FIELDS = [
-    "MDC Type",
-    "Configuration",
-    "Category",
-    "Part Number",
-    "Description",
-    "Quantity",
-    "Unit Price",
-    "Optional",
-    "Component Type",
-]
+# ------------------------------------------------------------
+# FALLBACK DATABASE GENERATED FROM THE PROVIDED EXCEL
+# ------------------------------------------------------------
+EMBEDDED_DATABASE = {'configs': {'Config 1': {'title': '', 'bom': []}, 'Config 3': {'title': 'SOLUTION 3  (7 kw Cooling W/o Dehumidifier)', 'bom': [{'part_number': 'CTO3M002', 'description': 'SINGLE RACK MDC, 7kW Cooling Unit, Without Dehumidifier', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801029209', 'description': 'MDC,42U 8*14 1R,INRACK7KW,EFSS', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'FRAME,42U-800X1200X2100  Front Glass Door , and rear sheet steel dual Spilt Door', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'FRONT DOOR WITH ELECTRONIC HANDLE WITH BIOMETRIC LOCK', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'REAR ELECTRONIC LOCK WITH EMERGENCY HIGH TEMPERATURE REAR DOOR OPENING', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'POWER DISTRIBUTION MODULE', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': '1 U SMART RACK MONITORING SYSTEM INTEGRATED WITH SMS, EMAIL - 1 NO.', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'TEMPERATURE SENSOR', 'quantity': 2, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'TEMPERATURE AND HUMIDITY SENSOR', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'WLD SENSOR CABLE', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'RODENT REPELLENT SYSTEM', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': '7” HMI DISPLAY', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'LED LIGHT, 12V LOGIC CONTROL', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'NORMAL LIGHTS WITH DOOR LIMIT SWITCH', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'BEACON ALARM, 12V, 108DB', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'BLANKING PANEL 1U', 'quantity': 20, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'MOUNTING HARDWARE PACK OF 20', 'quantity': 4, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'SMOKE DETECTOR', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'FULL TRAY', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401727', 'description': 'PAC, 7KW INVERTER RACK MNT WF ID', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401728', 'description': 'PAC, 7KW INVERTER RACK MNT WF OD', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401746', 'description': 'PAC, 7KW INV RACK MNT WF CONTROLLER', 'quantity': 1, 'uom': 'EA'}]}, 'Config 2': {'title': '', 'bom': []}, 'Config 4': {'title': 'SOLUTION 4 (7 kw Cooling With Dehumidifier)', 'bom': [{'part_number': 'CTO3M002', 'description': 'SINGLE RACK MDC, 7kW Cooling Unit, Dehumidifier', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801029209', 'description': 'MDC,42U 8*14 1R,INRACK7KW,EFSS', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801029209', 'description': 'FRAME,42U-800X1200X2100  Front Glass Door , and rear sheet steel dual Spilt Door', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'FRONT DOOR WITH ELECTRONIC HANDLE WITH BIOMETRIC LOCK', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'REAR ELECTRONIC LOCK WITH EMERGENCY HIGH TEMPERATURE REAR DOOR OPENING', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'POWER DISTRIBUTION MODULE', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': '1 U SMART RACK MONITORING SYSTEM INTEGRATED WITH SMS, EMAIL - 1 NO.', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'TEMPERATURE SENSOR', 'quantity': 2, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'TEMPERATURE AND HUMIDITY SENSOR', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'WLD SENSOR CABLE', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'RODENT REPELLENT SYSTEM', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': '7” HMI DISPLAY', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'LED LIGHT, 12V LOGIC CONTROL', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'NORMAL LIGHTS WITH DOOR LIMIT SWITCH', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'BEACON ALARM, 12V, 108DB', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'BLANKING PANEL 1U', 'quantity': 20, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'MOUNTING HARDWARE PACK OF 20', 'quantity': 4, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'SMOKE DETECTOR', 'quantity': 1, 'uom': 'EA'}, {'part_number': 'XXX', 'description': 'FULL TRAY', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401707', 'description': 'PAC, 8.6KW INV RACK MNT ATM S-007KAH', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401708', 'description': 'PAC, 12KW INV RACK MNT ATM OD KSF12AC', 'quantity': 1, 'uom': 'EA'}, {'part_number': '801401703', 'description': 'PAC, 3.5/7KW INVERTER RACK MNT ATM HMI', 'quantity': 1, 'uom': 'EA'}]}}, 'optional_items': [{'part_number': '801073203', 'description': 'FIRE SUPR EXT42U 8X14,1 RACK SOLN (EXTERNAL TYPE)', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': 'HRD-XH1C', 'description': 'FIRE SUPPRESS,RACK MNT FK-5-1-12,1.5m³', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303201', 'description': 'CAMERA,4MP VANDAL(CP-UNC-VC41L5C-VMD-LQ)', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303202', 'description': 'CAMERA,NVR 4 CHA INT(CP-UNR-4K4082-V4)', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303204', 'description': 'CAMERA,POE GB 4P,2UP(CP-DNW-GPU4G2-48C)', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303206', 'description': 'CAMERA,CAT 5 CABLE RJ45 TER', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303208', 'description': 'CAMERA,SVR HDD 1TB', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801303203', 'description': 'CAMERA,SVR HDD 4TB', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801223664', 'description': 'Rotating Keyboard tray', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801075237', 'description': '1 U CABLE MANAGER PLASTIC', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801029022', 'description': 'MDC,42U TOP CABLE TRAY IT', 'default_quantity': 1, 'uom': 'EA'}, {'part_number': '801075235', 'description': 'BRUSH PANEL 1 U', 'default_quantity': 1, 'uom': 'EA'}], 'pdu_items': [{'part_number': '802001004', 'description': 'B-PDU,ZU 20,32A 1P IEC309 20,0 230/230V', 'c13': 20, 'c19': 0, 'type': 'BASIC', 'uom': 'EA'}, {'part_number': '802001005', 'description': 'B-PDU,ZU 30,32A 1P IEC309 24,6 230/230V', 'c13': 24, 'c19': 6, 'type': 'BASIC', 'uom': 'EA'}, {'part_number': '802001006', 'description': 'B-PDU,ZU 42,32A 1P IEC309 36,6 230/230V', 'c13': 36, 'c19': 6, 'type': 'BASIC', 'uom': 'EA'}, {'part_number': '802001014', 'description': 'B-PDU,ZU 12,16A 1P IEC309 9,3 230/230V', 'c13': 9, 'c19': 3, 'type': 'BASIC', 'uom': 'EA'}, {'part_number': '802002003', 'description': 'M-PDU,ZU 24,16A 1P IEC309 20,4 230/230V', 'c13': 20, 'c19': 4, 'type': 'METERED', 'uom': 'EA'}, {'part_number': '802002005', 'description': 'M-PDU,ZU 24,32A 1P IEC309 20,4 230/230V', 'c13': 20, 'c19': 4, 'type': 'METERED', 'uom': 'EA'}, {'part_number': '802002006', 'description': 'M-PDU,ZU 34,32A 1P IEC309 28,6 230/230V', 'c13': 28, 'c19': 6, 'type': 'METERED', 'uom': 'EA'}, {'part_number': '802002007', 'description': 'M-PDU,ZU 42,32A 1P IEC309 36,6 230/230V', 'c13': 36, 'c19': 6, 'type': 'METERED', 'uom': 'EA'}, {'part_number': '802002012', 'description': 'M-PDU,ZU 34,32A 1P IEC309 28,6 230/230 W', 'c13': 28, 'c19': 6, 'type': 'METERED', 'uom': 'EA'}, {'part_number': '801601216', 'description': 'S-PDU ,ZU42,32A 1P IEC309 36,6 230/230V', 'c13': 36, 'c19': 6, 'type': 'SWITCHED', 'uom': 'EA'}, {'part_number': '802003002', 'description': 'S-PDU,ZU 16,16A 1P C20 12,4 230/230V', 'c13': 12, 'c19': 4, 'type': 'SWITCHED', 'uom': 'EA'}, {'part_number': '802003004', 'description': 'S-PDU,ZU 24,16A 1P IEC309 20,4 230/230V', 'c13': 20, 'c19': 4, 'type': 'SWITCHED', 'uom': 'EA'}, {'part_number': '802003006', 'description': 'S-PDU,ZU 24,32A 1P IEC309 20,4 230/400V', 'c13': 20, 'c19': 4, 'type': 'SWITCHED', 'uom': 'EA'}, {'part_number': '802003007', 'description': 'S-PDU,ZU 32,32A 1P IEC309 24,8 230/230V', 'c13': 24, 'c19': 8, 'type': 'SWITCHED', 'uom': 'EA'}, {'part_number': '802003008', 'description': 'S-PDU,ZU 44,32A 1P IEC309 34,6 230/230V', 'c13': 34, 'c19': 6, 'type': 'SWITCHED', 'uom': 'EA'}]}
 
-ALIASES = {
-    "MDC Type": [
-        "mdc type", "type", "mdc", "product type", "configuration type",
-        "single/multi", "single rack/multi rack"
-    ],
-    "Configuration": [
-        "configuration", "config", "config no", "config number",
-        "configuration no", "configuration number", "model", "variant"
-    ],
-    "Category": [
-        "category", "cat", "section", "bom category", "item category"
-    ],
-    "Part Number": [
-        "part number", "part no", "part#", "part", "pn", "item number",
-        "item no", "catalog number", "catalog no", "product number"
-    ],
-    "Description": [
-        "description", "product description", "item description",
-        "component", "component description", "product"
-    ],
-    "Quantity": [
-        "quantity", "qty", "required qty", "required quantity", "count"
-    ],
-    "Unit Price": [
-        "unit price", "price", "unit cost", "cost", "selling price",
-        "standard price", "rate", "amount"
-    ],
-    "Optional": [
-        "optional", "option", "optional component", "is optional",
-        "optional item", "mandatory/optional"
-    ],
-    "Component Type": [
-        "component type", "item type", "type of component", "component category"
-    ],
-}
+# ============================================================
+# EXCEL DATABASE READER
+# ============================================================
 
 def clean_text(value):
-    if pd.isna(value):
+    if value is None:
         return ""
-    return str(value).strip()
+    return str(value).replace("\xa0", " ").strip()
 
-def normalize_name(value):
-    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
-def auto_map_columns(columns):
-    normalized = {normalize_name(c): c for c in columns}
-    mapping = {}
-    for canonical, aliases in ALIASES.items():
-        found = None
-        alias_norms = [normalize_name(a) for a in aliases]
+def load_excel_database(path):
+    """
+    Reads the 1 Rack MDC BOQ workbook.
 
-        # Exact normalized match first
-        for a in alias_norms:
-            if a in normalized:
-                found = normalized[a]
+    Expected structure:
+      - Solution 1: columns A:D
+      - Solution 3: columns F:I
+      - Solution 2: columns A:D
+      - Solution 4: columns F:I
+      - Other Optional Items: rows below the four solutions
+      - Single Phase PDU catalogue: rows below optional items
+    """
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb.active
+
+    solution_blocks = [
+        (1, 1, "Config 1"),
+        (1, 6, "Config 3"),
+        (26, 1, "Config 2"),
+        (26, 6, "Config 4"),
+    ]
+
+    configs = {}
+
+    for title_row, start_col, config_name in solution_blocks:
+        title = clean_text(ws.cell(title_row, start_col).value)
+        bom = []
+
+        row = title_row + 2
+
+        while row <= ws.max_row:
+            part = ws.cell(row, start_col).value
+            description = ws.cell(row, start_col + 1).value
+            quantity = ws.cell(row, start_col + 2).value
+            uom = ws.cell(row, start_col + 3).value
+
+            if all(v is None for v in (part, description, quantity, uom)):
                 break
 
-        # Then partial match
-        if found is None:
-            for n, original in normalized.items():
-                if any(a and (a in n or n in a) for a in alias_norms):
-                    found = original
-                    break
+            if description is not None:
+                bom.append({
+                    "part_number": "XXX" if part is None else clean_text(part),
+                    "description": clean_text(description),
+                    "quantity": quantity if quantity is not None else 1,
+                    "uom": "EA" if uom is None else clean_text(uom),
+                })
 
-        mapping[canonical] = found
-    return mapping
+            row += 1
 
-def normalize_mdc_type(value):
-    s = clean_text(value).lower()
-    if "multi" in s:
-        return "Multi Rack MDC"
-    if "single" in s:
-        return "Single Rack MDC"
-    return clean_text(value)
+        configs[config_name] = {
+            "title": title,
+            "bom": bom,
+        }
 
-def normalize_config(value):
-    s = clean_text(value)
-    if not s:
-        return s
+    # Optional items from rows 52-63.
+    optional_items = []
 
-    m = re.search(r"(?:config(?:uration)?[\s._-]*)(\d+)", s, re.I)
-    if m:
-        return f"Config {m.group(1)}"
+    for row in range(52, 64):
+        part = ws.cell(row, 1).value
+        description = ws.cell(row, 2).value
+        quantity = ws.cell(row, 3).value
+        uom = ws.cell(row, 4).value
 
-    m = re.fullmatch(r"(\d+)", s)
-    if m:
-        return f"Config {m.group(1)}"
+        if description is not None:
+            optional_items.append({
+                "part_number": "XXX" if part is None else clean_text(part),
+                "description": clean_text(description),
+                "default_quantity": quantity if quantity is not None else 1,
+                "uom": "EA" if uom is None else clean_text(uom),
+            })
 
-    return s
+    # PDU catalogue from rows 66-80.
+    pdu_items = []
+    current_type = None
 
-def truthy_optional(value):
-    s = clean_text(value).lower()
-    return s in {
-        "yes", "y", "true", "1", "optional", "option",
-        "optional component", "o"
+    for row in range(66, 81):
+        part = ws.cell(row, 1).value
+        description = ws.cell(row, 2).value
+        c13 = ws.cell(row, 3).value
+        c19 = ws.cell(row, 4).value
+        item_type = ws.cell(row, 5).value
+
+        if item_type:
+            current_type = clean_text(item_type)
+
+        if part is not None and description is not None:
+            pdu_items.append({
+                "part_number": clean_text(part),
+                "description": clean_text(description),
+                "c13": c13,
+                "c19": c19,
+                "type": current_type or "OTHER",
+                "uom": "EA",
+            })
+
+    return {
+        "configs": configs,
+        "optional_items": optional_items,
+        "pdu_items": pdu_items,
     }
 
-def numeric_value(value):
-    if pd.isna(value):
-        return math.nan
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
 
-    s = str(value).strip().replace(",", "")
-    if not s or s.upper() in {"XXX", "N/A", "NA", "-", "TBD", "TBC"}:
-        return math.nan
+def get_database():
+    if EXCEL_PATH.exists():
+        try:
+            return load_excel_database(EXCEL_PATH), True, ""
+        except Exception as exc:
+            return EMBEDDED_DATABASE, False, str(exc)
 
-    # Remove currency symbols and spaces
-    s = re.sub(r"[₹$€£]", "", s).strip()
-    try:
-        return float(s)
-    except ValueError:
-        return math.nan
-
-def format_money(value, currency="INR"):
-    if pd.isna(value):
-        return "XXX"
-    if currency == "INR":
-        return f"₹{value:,.2f}"
-    return f"{currency} {value:,.2f}"
-
-def safe_sheet_name(name):
-    name = re.sub(r"[:\\/?*\[\]]", "_", str(name))
-    return name[:31] or "Sheet"
-
-def style_workbook(writer):
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-
-    wb = writer.book
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    header_font = Font(color="FFFFFF", bold=True)
-    thin = Side(style="thin", color="D9E1F2")
-
-    for ws in wb.worksheets:
-        ws.freeze_panes = "A2"
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = Border(bottom=thin)
-
-        for column_cells in ws.columns:
-            max_len = 0
-            for cell in column_cells:
-                value = "" if cell.value is None else str(cell.value)
-                max_len = max(max_len, len(value))
-            width = min(max(max_len + 2, 10), 45)
-            ws.column_dimensions[get_column_letter(column_cells[0].column)].width = width
-
-def create_template():
-    single = pd.DataFrame([
-        ["Single Rack MDC", "Config 1", "A.1", "801029209", "MDC Base Assembly", 1, "XXX", "No", "Standard"],
-        ["Single Rack MDC", "Config 1", "A.2", "COOL-35", "3.5 kW Cooling", 1, "XXX", "No", "Cooling"],
-        ["Single Rack MDC", "Config 1", "A.3", "OPT-001", "Example Optional Component", 1, "XXX", "Yes", "Optional"],
-        ["Single Rack MDC", "Config 2", "A.2", "COOL-70", "7 kW Cooling", 1, "XXX", "No", "Cooling"],
-    ], columns=CANONICAL_FIELDS)
-
-    multi = pd.DataFrame([
-        ["Multi Rack MDC", "Config 1", "A.1", "MR-BASE", "Multi Rack Base Assembly", 1, "XXX", "No", "Standard"],
-        ["Multi Rack MDC", "Config 1", "A.2", "MR-COOL", "Multi Rack Cooling", 1, "XXX", "No", "Cooling"],
-        ["Multi Rack MDC", "Config 1", "A.4", "MR-OPT-001", "Example Optional Component", 1, "XXX", "Yes", "Optional"],
-    ], columns=CANONICAL_FIELDS)
-
-    optional = pd.DataFrame([
-        ["Single Rack MDC", "Config 1", "A.3", "OPT-001", "Example Optional Component", 1, "XXX", "Yes", "Optional"],
-        ["Multi Rack MDC", "Config 1", "A.4", "MR-OPT-001", "Example Optional Component", 1, "XXX", "Yes", "Optional"],
-    ], columns=CANONICAL_FIELDS)
-
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        single.to_excel(writer, index=False, sheet_name="Single Rack")
-        multi.to_excel(writer, index=False, sheet_name="Multi Rack")
-        optional.to_excel(writer, index=False, sheet_name="Optional Components")
-        style_workbook(writer)
-    output.seek(0)
-    return output.getvalue()
-
-def prepare_dataframe(raw_df, mapping, sheet_name):
-    df = raw_df.copy()
-    output = pd.DataFrame()
-
-    for canonical in CANONICAL_FIELDS:
-        source = mapping.get(canonical)
-        if source and source in df.columns:
-            output[canonical] = df[source]
-        else:
-            output[canonical] = ""
-
-    # Useful fallbacks
-    if not output["MDC Type"].astype(str).str.strip().any():
-        output["MDC Type"] = normalize_mdc_type(sheet_name)
-
-    output["MDC Type"] = output["MDC Type"].apply(normalize_mdc_type)
-    output["Configuration"] = output["Configuration"].apply(normalize_config)
-
-    if not output["Quantity"].astype(str).str.strip().any():
-        output["Quantity"] = 1
-
-    if not output["Optional"].astype(str).str.strip().any():
-        output["Optional"] = "No"
-
-    output["Quantity"] = pd.to_numeric(output["Quantity"], errors="coerce").fillna(1)
-    output["Quantity"] = output["Quantity"].clip(lower=0)
-
-    output["Part Number"] = output["Part Number"].apply(clean_text)
-    output["Description"] = output["Description"].apply(clean_text)
-    output["Category"] = output["Category"].apply(clean_text)
-    output["Component Type"] = output["Component Type"].apply(clean_text)
-
-    return output
-
-def infer_optional(df):
-    result = df["Optional"].apply(truthy_optional)
-
-    if not result.any():
-        combined = (
-            df["Category"].astype(str) + " " +
-            df["Component Type"].astype(str) + " " +
-            df["Description"].astype(str)
-        ).str.lower()
-
-        result = combined.str.contains(
-            r"\boptional\b|\boption\b|\badd[- ]?on\b",
-            regex=True,
-            na=False,
-        )
-
-    return result
-
-def build_catalog(df):
-    df = df.copy()
-    df["_OptionalFlag"] = infer_optional(df)
-    return df
-
-def get_types(df):
-    vals = [clean_text(v) for v in df["MDC Type"].dropna().unique()]
-    vals = [v for v in vals if v]
-    if not vals:
-        return ["Single Rack MDC", "Multi Rack MDC"]
-    return vals
-
-def get_configs(df, mdc_type):
-    subset = df[df["MDC Type"].astype(str) == str(mdc_type)]
-    vals = [clean_text(v) for v in subset["Configuration"].dropna().unique()]
-    vals = [v for v in vals if v]
-
-    def sort_key(x):
-        m = re.search(r"(\d+)", x)
-        return (int(m.group(1)) if m else 9999, x)
-
-    return sorted(vals, key=sort_key)
-
-def rows_for_selection(df, mdc_type, config):
-    mask = (
-        (df["MDC Type"].astype(str) == str(mdc_type)) &
-        (df["Configuration"].astype(str) == str(config))
+    return EMBEDDED_DATABASE, False, (
+        f"Excel database not found at: {EXCEL_PATH}. "
+        "Using the database embedded from the supplied workbook."
     )
-    return df[mask].copy()
 
-def render_component_quantity_table(options, prefix):
-    selected = []
 
-    if options.empty:
-        st.info("No optional components were found for this selection.")
-        return selected
+DATABASE, EXCEL_LOADED, EXCEL_MESSAGE = get_database()
 
-    for idx, row in options.reset_index(drop=True).iterrows():
-        part = row["Part Number"] or f"ITEM-{idx+1}"
-        desc = row["Description"] or "Unnamed component"
-        default_qty = int(row["Quantity"]) if float(row["Quantity"]).is_integer() else float(row["Quantity"])
+if EXCEL_LOADED:
+    st.sidebar.success("✅ Excel database loaded")
+    st.sidebar.caption(EXCEL_FILENAME)
+else:
+    st.sidebar.warning("⚠️ Embedded database is being used")
+    st.sidebar.caption(EXCEL_MESSAGE)
 
-        c1, c2, c3, c4 = st.columns([0.7, 3.8, 1.2, 1.5])
-        with c1:
-            checked = st.checkbox(
-                "Select",
-                key=f"{prefix}_check_{idx}",
-                label_visibility="collapsed",
-            )
-        with c2:
-            st.write(f"**{desc}**")
-            st.caption(f"Part No: {part}")
-        with c3:
-            qty = st.number_input(
-                "Qty",
-                min_value=1.0,
-                value=float(default_qty) if default_qty > 0 else 1.0,
-                step=1.0,
-                key=f"{prefix}_qty_{idx}",
-                disabled=not checked,
-            )
-        with c4:
-            price = numeric_value(row["Unit Price"])
-            st.write("XXX" if pd.isna(price) else format_money(price))
+# ============================================================
+# PRICE MASTER — EDIT ONLY IN CODE
+#
+# IMPORTANT:
+# The supplied Excel contains BOM/SKU information, not prices.
+# Therefore prices remain a separate code-only master.
+# Replace XXX with official prices when available.
+# ============================================================
 
-        if checked:
-            item = row.to_dict()
-            item["_SelectedQty"] = qty
-            selected.append(item)
+STANDARD_PRICES = {
+    "Config 1": 20.200,
+    "Config 2": 30000,
+    "Config 3": 27000,
+    "Config 4": 32000,
+}
 
-    return selected
+OPTIONAL_PRICES = {
+    "Fire Suppression System - External": 35000,
+    "Fire Suppression System - In-Rack": 30000,
+    "CAMERA,4MP VANDAL(CP-UNC-VC41L5C-VMD-LQ)": 34000,
+    "UPS": "XXX",
+    "Rotating Keyboard tray": "XXX",
+    "1 U CABLE MANAGER PLASTIC": "XXX",
+    "MDC,42U TOP CABLE TRAY IT": "XXX",
+    "BRUSH PANEL 1 U": "XXX",
+}
 
-def build_bom(records):
-    if not records:
-        return pd.DataFrame(columns=[
-            "MDC No", "MDC Type", "Configuration", "Category",
-            "Part Number", "Description", "Quantity", "Unit Price",
-            "Extended Price", "Optional"
-        ])
+# ============================================================
+# CURRENCY
+# ============================================================
 
-    rows = []
-    for r in records:
-        qty = float(r.get("_SelectedQty", r.get("Quantity", 1)))
-        unit = numeric_value(r.get("Unit Price"))
-        extended = qty * unit if not pd.isna(unit) else math.nan
+@st.cache_data(ttl=3600)
+def get_live_exchange_rate(from_currency, to_currency):
+    if from_currency == to_currency:
+        return 1.0
 
-        rows.append({
-            "MDC No": r.get("_MDCNo", ""),
-            "MDC Type": r.get("MDC Type", ""),
-            "Configuration": r.get("Configuration", ""),
-            "Category": r.get("Category", ""),
-            "Part Number": r.get("Part Number", ""),
-            "Description": r.get("Description", ""),
-            "Quantity": qty,
-            "Unit Price": unit if not pd.isna(unit) else "XXX",
-            "Extended Price": extended if not pd.isna(extended) else "XXX",
-            "Optional": "Yes" if r.get("_OptionalFlag", False) else "No",
-        })
+    try:
+        response = requests.get(
+            f"https://api.frankfurter.dev/v2/rate/{from_currency}/{to_currency}",
+            timeout=10
+        )
+        response.raise_for_status()
+        return float(response.json()["rate"])
+    except Exception:
+        return None
 
-    bom = pd.DataFrame(rows)
 
-    # Aggregate identical BOM lines
-    if not bom.empty:
-        grouped_rows = []
-        group_cols = [
-            "MDC Type", "Configuration", "Category",
-            "Part Number", "Description", "Unit Price", "Optional"
-        ]
+def currency_symbol(currency):
+    return "₹" if currency == "INR" else "$" if currency == "USD" else ""
 
-        for keys, group in bom.groupby(group_cols, dropna=False, sort=False):
-            rec = dict(zip(group_cols, keys))
-            rec["MDC No"] = ", ".join(sorted(set(group["MDC No"].astype(str))))
-            rec["Quantity"] = group["Quantity"].sum()
 
-            unit = numeric_value(rec["Unit Price"])
-            rec["Extended Price"] = (
-                rec["Quantity"] * unit if not pd.isna(unit) else "XXX"
-            )
-            grouped_rows.append(rec)
+def is_numeric_price(value):
+    if isinstance(value, bool):
+        return False
 
-        bom = pd.DataFrame(grouped_rows)
+    if isinstance(value, (int, float)):
+        return True
 
-    return bom
+    if isinstance(value, str):
+        try:
+            float(value.strip().replace(",", ""))
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    return False
+
+
+def numeric_price(value):
+    if not is_numeric_price(value):
+        return None
+    return float(str(value).strip().replace(",", ""))
+
+
+def format_price(value):
+    number = numeric_price(value)
+
+    if number is None:
+        return "XXX"
+
+    converted = number * exchange_rate
+    return f"{currency_symbol(selected_currency)} {converted:,.2f}"
+
+
+def calculate_amount(unit_price, quantity):
+    number = numeric_price(unit_price)
+
+    if number is None:
+        return None
+
+    return number * int(quantity)
+
+
+# ============================================================
+# CURRENCY SETTINGS
+# ============================================================
+
+st.header("💱 Currency Settings")
+
+currency_col1, currency_col2 = st.columns([2, 2])
+
+with currency_col1:
+    selected_currency = st.radio(
+        "Display Currency",
+        ["INR", "USD"],
+        horizontal=True
+    )
+
+if selected_currency == "INR":
+    exchange_rate = 1.0
+else:
+    exchange_rate = get_live_exchange_rate("INR", "USD")
+
+    if exchange_rate is None:
+        st.error("Unable to fetch live INR → USD exchange rate.")
+        st.stop()
+
+if selected_currency == "USD":
+    st.success(f"Live Exchange Rate: ₹1 = ${exchange_rate:.4f}")
+else:
+    st.info("Displaying all values in Indian Rupees (INR)")
+
+st.divider()
 
 # ============================================================
 # HEADER
 # ============================================================
 
-st.title("⚡ Eaton MDC Configuration & BOM Generator")
-st.caption(
-    "Excel-driven configuration system — upload the current Excel workbook, "
-    "map its columns once, configure each MDC, and download the BOM."
+st.title("🏭 MDC Configuration & BOM Generator")
+
+st.markdown(
+    """
+    Select an MDC configuration, review the exact SKU/BOM data
+    read from the Excel database, select optional items, and
+    generate the commercial BOM.
+    """
 )
 
 # ============================================================
-# SIDEBAR
+# STEP 1 — MDC TYPE
 # ============================================================
 
-with st.sidebar:
-    st.header("Project Controls")
-    currency = st.selectbox("Display Currency", ["INR", "USD"], index=0)
+st.header("1️⃣ Select MDC Type")
 
-    if currency == "USD":
-        inr_to_usd = st.number_input(
-            "INR → USD conversion rate",
-            min_value=0.000001,
-            value=0.012,
-            step=0.001,
-            format="%.6f",
-            help="Manual rate so the application remains fully offline.",
-        )
-    else:
-        inr_to_usd = 1.0
-
-    st.divider()
-    st.download_button(
-        "⬇️ Download Excel Template",
-        data=create_template(),
-        file_name="MDC_Excel_Template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-# ============================================================
-# FILE UPLOAD
-# ============================================================
-
-st.header("1. Upload Current MDC Excel")
-
-uploaded = st.file_uploader(
-    "Upload the Excel workbook used by your team",
-    type=["xlsx", "xls"],
-    help="The workbook is read directly in this Streamlit session. "
-         "It does not need to be stored in GitHub.",
+mdc_type = st.selectbox(
+    "MDC Type",
+    ["Single Rack MDC"]
 )
 
-if uploaded is None:
-    st.info(
-        "Upload the mentor/team Excel file to start. "
-        "The application is intentionally designed so the Excel file is supplied "
-        "by the user through the UI."
+# ============================================================
+# STEP 2 — CUSTOMER DETAILS
+# ============================================================
+
+st.header("2️⃣ Customer & Project Details")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    customer_name = st.text_input(
+        "Customer Name *",
+        placeholder="Enter customer / company name"
     )
 
-    st.markdown(
-        """
-### How this version works
-
-1. Upload the current Excel workbook.
-2. Select the sheet containing the MDC data.
-3. The application automatically detects common column names.
-4. Correct the mapping if required.
-5. Review/edit the imported data.
-6. Select the number of MDCs.
-7. Configure each MDC separately.
-8. A.2 is one cooling selection per MDC.
-9. A.3/A.4/A.5 can contain multiple selections.
-10. Optional components have their own quantity.
-11. Standard + optional pricing is calculated.
-12. Download the final BOM with and without pricing.
-        """
+with col2:
+    customer_place = st.text_input(
+        "Customer Place *",
+        placeholder="Enter city / location"
     )
-    st.stop()
+
+problem_col, solution_col = st.columns(2)
+
+with problem_col:
+    problem_statement = st.text_area(
+        "Problem / Requirement",
+        placeholder="Describe the customer's requirement..."
+    )
+
+with solution_col:
+    proposed_solution = st.text_area(
+        "Proposed Solution",
+        placeholder="Describe the proposed MDC solution..."
+    )
 
 # ============================================================
-# READ WORKBOOK
+# STEP 3 — CONFIGURATION
 # ============================================================
 
-try:
-    file_bytes = uploaded.getvalue()
-    excel = pd.ExcelFile(BytesIO(file_bytes))
-    sheet_names = excel.sheet_names
+st.header("3️⃣ Select Configuration")
 
-    st.success(f"Excel loaded successfully: {uploaded.name}")
-    st.write(f"**Sheets found:** {len(sheet_names)}")
+config_data = DATABASE["configs"]
 
-except Exception as e:
-    st.error(f"Could not read the Excel workbook: {e}")
-    st.stop()
-
-# ============================================================
-# SHEET SELECTION
-# ============================================================
-
-st.header("2. Select Excel Sheet")
-
-selected_sheet = st.selectbox(
-    "Choose the sheet containing the configuration/BOM data",
-    sheet_names,
+selected_config = st.selectbox(
+    "Configuration",
+    list(config_data.keys()),
+    format_func=lambda key: f"{key} — {config_data[key]['title']}"
 )
 
-try:
-    raw_df = pd.read_excel(BytesIO(file_bytes), sheet_name=selected_sheet)
-except Exception as e:
-    st.error(f"Could not read sheet '{selected_sheet}': {e}")
-    st.stop()
-
-if raw_df.empty:
-    st.warning("The selected sheet is empty.")
-    st.stop()
-
-st.write(f"Rows: **{len(raw_df)}** | Columns: **{len(raw_df.columns)}**")
-
-with st.expander("Preview original Excel data"):
-    st.dataframe(raw_df.head(20), use_container_width=True)
+selected_config_data = config_data[selected_config]
+selected_bom = selected_config_data["bom"]
 
 # ============================================================
-# COLUMN MAPPING
+# STANDARD CONFIG PRICE
 # ============================================================
 
-st.header("3. Map Excel Columns")
+standard_price = STANDARD_PRICES.get(selected_config, "XXX")
 
-auto_mapping = auto_map_columns(raw_df.columns)
-column_options = ["— Not available —"] + list(raw_df.columns)
+st.subheader("💵 Standard Configuration Cost")
 
-mapping = {}
+p1, p2 = st.columns([2, 1])
 
-cols = st.columns(3)
-for i, canonical in enumerate(CANONICAL_FIELDS):
-    with cols[i % 3]:
-        suggested = auto_mapping.get(canonical)
-        default_index = (
-            column_options.index(suggested)
-            if suggested in column_options
-            else 0
-        )
+with p1:
+    st.metric(
+        "Standard Cost",
+        format_price(standard_price)
+    )
 
-        selected = st.selectbox(
-            canonical,
-            column_options,
-            index=default_index,
-            key=f"map_{canonical}",
-        )
-        mapping[canonical] = None if selected == "— Not available —" else selected
-
-if mapping.get("Part Number") is None or mapping.get("Description") is None:
-    st.warning(
-        "Part Number and Description are the most important BOM fields. "
-        "Please map them if they exist in the workbook."
+with p2:
+    st.caption(
+        "Standard prices are maintained only in the Python PRICE MASTER. "
+        "The Excel database supplies SKU/BOM information."
     )
 
 # ============================================================
-# PREPARE DATA
+# STEP 4 — EXACT EXCEL BOM
 # ============================================================
 
-df = prepare_dataframe(raw_df, mapping, selected_sheet)
-df = build_catalog(df)
+st.header("4️⃣ Complete Configuration BOM")
 
-# If there is no useful MDC Type information, allow a manual default.
-if not df["MDC Type"].astype(str).str.strip().any():
-    manual_type = st.selectbox(
-        "Default MDC Type for this sheet",
-        ["Single Rack MDC", "Multi Rack MDC"],
-    )
-    df["MDC Type"] = manual_type
+bom_preview_rows = []
 
-# If no configuration information exists, create a default configuration.
-if not df["Configuration"].astype(str).str.strip().any():
-    manual_config = st.text_input("Default Configuration for this sheet", "Config 1")
-    df["Configuration"] = manual_config
+for item in selected_bom:
+    bom_preview_rows.append({
+        "Part Number": item["part_number"],
+        "Description": item["description"],
+        "Quantity": item["quantity"],
+        "UOM": item["uom"],
+    })
 
-# ============================================================
-# DATA CORRECTION
-# ============================================================
+bom_preview_df = pd.DataFrame(bom_preview_rows)
 
-st.header("4. Review / Correct Imported Data")
-
-st.caption(
-    "You can correct missing values here before configuring the MDC. "
-    "This does not modify the original Excel file."
-)
-
-editable_columns = CANONICAL_FIELDS
-edited_df = st.data_editor(
-    df[editable_columns],
+st.dataframe(
+    bom_preview_df,
     use_container_width=True,
-    num_rows="dynamic",
-    key="mdc_data_editor",
-)
-
-df = build_catalog(edited_df)
-
-# ============================================================
-# MDC CONFIGURATION
-# ============================================================
-
-st.header("5. MDC Configuration")
-
-types = get_types(df)
-mdc_count = st.number_input(
-    "Number of MDCs required",
-    min_value=1,
-    max_value=50,
-    value=1,
-    step=1,
-    help="A.1 quantity is controlled here. You do not need to enter A.1 quantity again for MDC 1, MDC 2, etc.",
+    hide_index=True
 )
 
 st.caption(
-    "Each MDC is configured independently. Standard configuration data is taken "
-    "from the uploaded Excel workbook."
+    f"{len(bom_preview_df)} BOM lines loaded from the Excel database."
 )
 
-all_records = []
-configuration_summary = []
-cost_rows = []
+# ============================================================
+# STEP 5 — OPTIONAL ITEMS
+# ============================================================
 
-for mdc_no in range(1, int(mdc_count) + 1):
-    st.subheader(f"MDC {mdc_no}")
+st.header("5️⃣ Optional Components")
 
-    type_key = f"mdc_type_{mdc_no}"
-    config_key = f"mdc_config_{mdc_no}"
+st.info(
+    "Optional items below are taken directly from the Excel "
+    "section 'OTHER OPTIONAL ITEMS (TO BE INCLUDED AS PER NEED BASIS)'. "
+    "Select an item and enter quantity."
+)
 
-    selected_type = st.selectbox(
-        "MDC Type",
-        types,
-        key=type_key,
-    )
+selected_optional_items = []
 
-    configs = get_configs(df, selected_type)
+for index, item in enumerate(DATABASE["optional_items"]):
+    key_base = f"{selected_config}_{index}_{item['part_number']}_{item['description']}"
 
-    if not configs:
-        st.warning(
-            f"No configurations were found for {selected_type}. "
-            "Check the Configuration column mapping/data."
+    c1, c2, c3, c4 = st.columns([0.7, 4.5, 1.2, 1.5])
+
+    with c1:
+        selected = st.checkbox(
+            "",
+            key=f"optional_selected_{key_base}"
         )
-        continue
 
-    selected_config = st.selectbox(
-        "Configuration",
-        configs,
-        key=config_key,
+    with c2:
+        st.write(f"**{item['description']}**")
+        st.caption(f"Part Number: {item['part_number']}")
+
+    with c3:
+        unit_price = OPTIONAL_PRICES.get(item["description"], "XXX")
+        st.write(f"Unit Cost: **{format_price(unit_price)}**")
+
+    with c4:
+        if selected:
+            quantity = st.number_input(
+                "Quantity",
+                min_value=1,
+                value=int(item["default_quantity"]) if str(item["default_quantity"]).isdigit() else 1,
+                step=1,
+                key=f"optional_qty_{key_base}"
+            )
+        else:
+            quantity = 0
+
+    if selected:
+        unit_price = OPTIONAL_PRICES.get(item["description"], "XXX")
+        amount = calculate_amount(unit_price, quantity)
+
+        selected_optional_items.append({
+            "part_number": item["part_number"],
+            "description": item["description"],
+            "quantity": quantity,
+            "uom": item["uom"],
+            "unit_price": unit_price,
+            "amount": amount,
+        })
+
+# ============================================================
+# PDU CATALOGUE
+# ============================================================
+
+st.subheader("🔌 Single Phase PDU Catalogue")
+
+pdu_df = pd.DataFrame(DATABASE["pdu_items"])
+
+if not pdu_df.empty:
+    pdu_display = pdu_df[
+        ["type", "part_number", "description", "c13", "c19", "uom"]
+    ].rename(columns={
+        "type": "Type",
+        "part_number": "Part Number",
+        "description": "Description",
+        "c13": "C13",
+        "c19": "C19",
+        "uom": "UOM",
+    })
+
+    st.dataframe(
+        pdu_display,
+        use_container_width=True,
+        hide_index=True
     )
 
-    selected_rows = rows_for_selection(df, selected_type, selected_config)
-
-    if selected_rows.empty:
-        st.warning("No BOM rows found for this MDC/configuration.")
-        continue
-
-    standard_rows = selected_rows[
-        ~selected_rows["_OptionalFlag"]
-    ].copy()
-
-    optional_rows = selected_rows[
-        selected_rows["_OptionalFlag"]
-    ].copy()
-
-    # --------------------------------------------------------
-    # STANDARD BOM
-    # --------------------------------------------------------
-
-    with st.expander(f"MDC {mdc_no} — Standard Components", expanded=True):
-        if standard_rows.empty:
-            st.info("No standard components found.")
-        else:
-            display_standard = standard_rows[
-                [
-                    "Category", "Part Number", "Description",
-                    "Quantity", "Unit Price", "Component Type"
-                ]
-            ].copy()
-
-            display_standard["Unit Price"] = display_standard["Unit Price"].apply(
-                lambda x: "XXX" if pd.isna(numeric_value(x)) else format_money(numeric_value(x))
-            )
-
-            st.dataframe(display_standard, use_container_width=True)
-
-    # --------------------------------------------------------
-    # CATEGORY-BASED CONFIGURATION
-    # --------------------------------------------------------
-
-    category_values = [
-        c for c in selected_rows["Category"].dropna().astype(str).unique()
-        if c.strip()
+    pdu_options = ["None"] + [
+        f"{row['type']} | {row['part_number']} | {row['description']}"
+        for _, row in pdu_df.iterrows()
     ]
 
-    if category_values:
-        st.markdown("#### Category Selections")
+    selected_pdu_label = st.selectbox(
+        "Select PDU, if required",
+        pdu_options
+    )
+else:
+    selected_pdu_label = "None"
 
-        for category in category_values:
-            category_rows = selected_rows[
-                selected_rows["Category"].astype(str) == category
-            ].copy()
+# Add selected PDU as an optional BOM line.
+if selected_pdu_label != "None":
+    selected_pdu = next(
+        row for row in DATABASE["pdu_items"]
+        if f"{row['type']} | {row['part_number']} | {row['description']}" == selected_pdu_label
+    )
 
-            # A.2 = exactly one cooling choice
-            if category.strip().upper().startswith("A.2"):
-                cooling_rows = category_rows[
-                    ~category_rows["_OptionalFlag"]
-                ].copy()
+    pdu_qty = st.number_input(
+        "PDU Quantity",
+        min_value=1,
+        value=1,
+        step=1,
+        key=f"pdu_quantity_{selected_config}"
+    )
 
-                if len(cooling_rows) > 1:
-                    options = [
-                        f"{r['Description']} | {r['Part Number']}"
-                        for _, r in cooling_rows.iterrows()
-                    ]
+    pdu_price = OPTIONAL_PRICES.get(
+        selected_pdu["description"],
+        "XXX"
+    )
 
-                    chosen = st.radio(
-                        f"{category} — Cooling (choose one)",
-                        options,
-                        key=f"cooling_{mdc_no}_{re.sub(r'[^a-zA-Z0-9]', '_', category)}",
-                    )
-
-                    chosen_idx = options.index(chosen)
-                    chosen_row = cooling_rows.iloc[chosen_idx].to_dict()
-                    chosen_row["_MDCNo"] = mdc_no
-                    chosen_row["_SelectedQty"] = chosen_row.get("Quantity", 1)
-                    chosen_row["_OptionalFlag"] = False
-                    all_records.append(chosen_row)
-
-                    # Add any non-cooling standard rows from this category only if
-                    # there was no multiple-choice cooling competition.
-                    other_rows = cooling_rows.drop(cooling_rows.index[chosen_idx])
-                    if not other_rows.empty:
-                        # intentionally not added because A.2 is one choice
-                        pass
-                elif len(cooling_rows) == 1:
-                    r = cooling_rows.iloc[0].to_dict()
-                    r["_MDCNo"] = mdc_no
-                    r["_SelectedQty"] = r.get("Quantity", 1)
-                    r["_OptionalFlag"] = False
-                    all_records.append(r)
-
-            # A.3/A.4/A.5 = multiple selections
-            elif re.match(r"^A\.[345]", category.strip(), re.I):
-                st.markdown(f"**{category} — Multiple selections allowed**")
-                candidates = category_rows[category_rows["_OptionalFlag"]].copy()
-
-                if candidates.empty:
-                    candidates = category_rows.copy()
-
-                chosen_records = render_component_quantity_table(
-                    candidates,
-                    prefix=f"mdc_{mdc_no}_{re.sub(r'[^a-zA-Z0-9]', '_', category)}",
-                )
-
-                for r in chosen_records:
-                    r["_MDCNo"] = mdc_no
-                    all_records.append(r)
-
-            else:
-                # Other categories are informational/standard.
-                pass
-
-    # --------------------------------------------------------
-    # OPTIONAL COMPONENTS
-    # --------------------------------------------------------
-
-    with st.expander(f"MDC {mdc_no} — Optional Components", expanded=True):
-        optional_selected = render_component_quantity_table(
-            optional_rows,
-            prefix=f"optional_{mdc_no}",
-        )
-
-        for r in optional_selected:
-            r["_MDCNo"] = mdc_no
-            r["_OptionalFlag"] = True
-            all_records.append(r)
-
-    # --------------------------------------------------------
-    # STANDARD ROWS NOT COVERED BY A.2 RADIO
-    # --------------------------------------------------------
-
-    # Add standard rows from categories other than A.2/A.3/A.4/A.5.
-    for _, r in standard_rows.iterrows():
-        category = clean_text(r["Category"]).upper()
-
-        if category.startswith("A.2"):
-            # Already handled by A.2 selector above.
-            continue
-
-        if re.match(r"^A\.[345]", category, re.I):
-            # These are explicitly selectable if optional; do not automatically
-            # add them because the user may choose a subset.
-            continue
-
-        rec = r.to_dict()
-        rec["_MDCNo"] = mdc_no
-        rec["_SelectedQty"] = rec.get("Quantity", 1)
-        rec["_OptionalFlag"] = False
-        all_records.append(rec)
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
-
-    configuration_summary.append({
-        "MDC No": mdc_no,
-        "MDC Type": selected_type,
-        "Configuration": selected_config,
+    selected_optional_items.append({
+        "part_number": selected_pdu["part_number"],
+        "description": selected_pdu["description"],
+        "quantity": pdu_qty,
+        "uom": selected_pdu["uom"],
+        "unit_price": pdu_price,
+        "amount": calculate_amount(pdu_price, pdu_qty),
     })
 
 # ============================================================
-# BOM + PRICING
+# OPTIONAL SUMMARY
 # ============================================================
 
-st.header("6. BOM & Pricing")
+st.subheader("📋 Selected Optional Components")
 
-bom = build_bom(all_records)
+if selected_optional_items:
+    optional_rows = []
 
-if bom.empty:
-    st.info("Configure at least one MDC to generate the BOM.")
-    st.stop()
+    for item in selected_optional_items:
+        optional_rows.append({
+            "Part Number": item["part_number"],
+            "Description": item["description"],
+            "Quantity": item["quantity"],
+            "UOM": item["uom"],
+            "Unit Cost": format_price(item["unit_price"]),
+            "Amount": (
+                format_price(item["amount"])
+                if item["amount"] is not None
+                else "XXX"
+            ),
+        })
 
-bom_with_pricing = bom.copy()
+    optional_df = pd.DataFrame(optional_rows)
 
-# Numeric totals
-numeric_extended = pd.to_numeric(
-    bom_with_pricing["Extended Price"],
-    errors="coerce"
+    st.dataframe(
+        optional_df,
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    optional_df = pd.DataFrame(
+        columns=[
+            "Part Number",
+            "Description",
+            "Quantity",
+            "UOM",
+            "Unit Cost",
+            "Amount",
+        ]
+    )
+
+    st.info("No optional components selected.")
+
+# ============================================================
+# COST SUMMARY
+# ============================================================
+
+st.header("6️⃣ Cost Summary")
+
+standard_numeric = numeric_price(standard_price)
+optional_total = 0.0
+unknown_optional_price = False
+
+for item in selected_optional_items:
+    if item["amount"] is None:
+        unknown_optional_price = True
+    else:
+        optional_total += item["amount"]
+
+if standard_numeric is not None and not unknown_optional_price:
+    total_cost = standard_numeric + optional_total
+else:
+    total_cost = None
+
+cost_rows = [{
+    "Cost Item": "Standard Configuration",
+    "Quantity": 1,
+    "Unit Cost": format_price(standard_price),
+    "Total Cost": format_price(standard_price),
+}]
+
+for item in selected_optional_items:
+    cost_rows.append({
+        "Cost Item": item["description"],
+        "Quantity": item["quantity"],
+        "Unit Cost": format_price(item["unit_price"]),
+        "Total Cost": (
+            format_price(item["amount"])
+            if item["amount"] is not None
+            else "XXX"
+        ),
+    })
+
+cost_df = pd.DataFrame(cost_rows)
+
+st.dataframe(
+    cost_df,
+    use_container_width=True,
+    hide_index=True
 )
 
-known_total = numeric_extended.sum(min_count=1)
-unknown_price_rows = numeric_extended.isna().sum()
-
-if pd.isna(known_total):
-    known_total = math.nan
-
-optional_bom = bom_with_pricing[
-    bom_with_pricing["Optional"].astype(str).str.lower() == "yes"
-].copy()
-
-standard_bom = bom_with_pricing[
-    bom_with_pricing["Optional"].astype(str).str.lower() != "yes"
-].copy()
-
-standard_total = pd.to_numeric(
-    standard_bom["Extended Price"], errors="coerce"
-).sum(min_count=1)
-
-optional_total = pd.to_numeric(
-    optional_bom["Extended Price"], errors="coerce"
-).sum(min_count=1)
-
-if pd.isna(standard_total):
-    standard_total = math.nan
-if pd.isna(optional_total):
-    optional_total = math.nan
-
-# USD display only
-def convert_value(value):
-    if pd.isna(value):
-        return math.nan
-    return value * inr_to_usd
-
-display_standard_total = convert_value(standard_total)
-display_optional_total = convert_value(optional_total)
-display_total = convert_value(known_total)
-
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3 = st.columns(3)
 
 with c1:
     st.metric(
-        "Standard Cost",
-        "XXX" if pd.isna(display_standard_total)
-        else format_money(display_standard_total, currency),
+        "Standard Configuration Cost",
+        format_price(standard_price)
     )
 
 with c2:
     st.metric(
-        "Optional Cost",
-        "XXX" if pd.isna(display_optional_total)
-        else format_money(display_optional_total, currency),
+        "Optional Components Cost",
+        format_price(optional_total)
+        if not unknown_optional_price
+        else "XXX"
     )
 
 with c3:
     st.metric(
-        "Total Cost",
-        "XXX" if pd.isna(display_total)
-        else format_money(display_total, currency),
+        "TOTAL COST",
+        format_price(total_cost)
+        if total_cost is not None
+        else "XXX"
     )
 
-with c4:
-    st.metric("BOM Lines", len(bom_with_pricing))
+# ============================================================
+# COST → PRICE
+# ============================================================
 
-if unknown_price_rows > 0:
-    st.warning(
-        f"{unknown_price_rows} BOM line(s) have non-numeric prices such as "
-        "`XXX`. Those lines are included in the BOM but are not included in "
-        "the numeric total."
-    )
+st.subheader("📈 Cost → Price Conversion")
 
-st.subheader("Generated BOM")
+DEFAULT_PRICING_FACTORS = [
+    ("Factory Cost (COGS)", 0.0),
+    ("Admin & R&D Overhead", 15.0),
+    ("Marketing & Sales", 20.0),
+    ("Manufacturer Profit", 15.0),
+    ("Distribution & Retail", 45.0),
+]
 
-display_bom = bom_with_pricing.copy()
+pricing_factor_rows = []
 
-# Display converted currency without changing export values
-if currency == "USD":
-    for col in ["Unit Price", "Extended Price"]:
-        display_bom[col] = display_bom[col].apply(
-            lambda x: "XXX"
-            if pd.isna(numeric_value(x))
-            else format_money(convert_value(numeric_value(x)), currency)
+for index, (default_name, default_percentage) in enumerate(
+    DEFAULT_PRICING_FACTORS,
+    start=1
+):
+    c1, c2 = st.columns([3, 1])
+
+    with c1:
+        factor_name = st.text_input(
+            f"Layer {index} — Name",
+            value=default_name,
+            key=f"pricing_name_{index}"
         )
+
+    with c2:
+        factor_percentage = st.number_input(
+            "Percentage",
+            min_value=0.0,
+            max_value=1000.0,
+            value=default_percentage,
+            step=0.5,
+            format="%.2f",
+            key=f"pricing_percentage_{index}"
+        )
+
+    pricing_factor_rows.append({
+        "Layer": index,
+        "Name": factor_name.strip(),
+        "Percentage": float(factor_percentage),
+    })
+
+pricing_build_up_rows = []
+running_amount = total_cost
+
+for row in pricing_factor_rows:
+    layer = row["Layer"]
+    name = row["Name"]
+    percentage = row["Percentage"]
+
+    if layer == 1:
+        previous_display = (
+            format_price(total_cost)
+            if total_cost is not None
+            else "XXX"
+        )
+        added_display = "—"
+        cumulative_display = (
+            format_price(total_cost)
+            if total_cost is not None
+            else "XXX"
+        )
+    else:
+        if running_amount is not None:
+            previous_amount = running_amount
+            added_amount = running_amount * (percentage / 100.0)
+            running_amount += added_amount
+
+            previous_display = format_price(previous_amount)
+            added_display = f"+{percentage:.2f}% = {format_price(added_amount)}"
+            cumulative_display = format_price(running_amount)
+        else:
+            previous_display = "XXX"
+            added_display = f"+{percentage:.2f}% = XXX"
+            cumulative_display = "XXX"
+
+    pricing_build_up_rows.append({
+        "Layer": layer,
+        "Name": name,
+        "Percentage Added": (
+            "Baseline" if layer == 1 else f"{percentage:.2f}%"
+        ),
+        "Previous Amount": previous_display,
+        "Added Amount": added_display,
+        "Cumulative Price": cumulative_display,
+    })
+
+pricing_build_up_df = pd.DataFrame(pricing_build_up_rows)
+
+st.dataframe(
+    pricing_build_up_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+selling_price = (
+    running_amount
+    if total_cost is not None
+    else None
+)
+
+st.subheader("🏷️ Final Selling Price")
+
+if selling_price is not None:
+    st.success(f"### {format_price(selling_price)}")
 else:
-    for col in ["Unit Price", "Extended Price"]:
-        display_bom[col] = display_bom[col].apply(
-            lambda x: "XXX"
-            if pd.isna(numeric_value(x))
-            else format_money(numeric_value(x), currency)
-        )
-
-st.dataframe(display_bom, use_container_width=True)
+    st.success("### XXX")
 
 # ============================================================
-# EXPORT
+# WARNINGS
 # ============================================================
 
-st.header("7. Download Excel BOM")
+if not customer_name.strip() or not customer_place.strip():
+    st.warning("Customer Name and Customer Place are compulsory.")
 
-bom_without_pricing = bom_with_pricing[
-    [
-        "MDC No", "MDC Type", "Configuration", "Category",
-        "Part Number", "Description", "Quantity", "Optional"
+if not is_numeric_price(standard_price):
+    st.warning(
+        f"{selected_config} standard price is XXX. "
+        "Update STANDARD_PRICES in the Python PRICE MASTER."
+    )
+
+if unknown_optional_price:
+    st.warning(
+        "One or more selected optional items do not have a price. "
+        "Update OPTIONAL_PRICES in the Python PRICE MASTER."
+    )
+
+# ============================================================
+# STEP 7 — FINAL BOM
+# ============================================================
+
+st.header("7️⃣ Final BOM")
+
+final_bom_rows = []
+
+# Exact Excel BOM.
+for item in selected_bom:
+    final_bom_rows.append({
+        "Category": "Standard",
+        "Part Number": item["part_number"],
+        "Description": item["description"],
+        "Quantity": item["quantity"],
+        "UOM": item["uom"],
+        "Unit Price": "",
+        "Amount": "",
+    })
+
+# Selected optional items.
+for item in selected_optional_items:
+    final_bom_rows.append({
+        "Category": "Optional",
+        "Part Number": item["part_number"],
+        "Description": item["description"],
+        "Quantity": item["quantity"],
+        "UOM": item["uom"],
+        "Unit Price": format_price(item["unit_price"]),
+        "Amount": (
+            format_price(item["amount"])
+            if item["amount"] is not None
+            else "XXX"
+        ),
+    })
+
+final_bom_df = pd.DataFrame(
+    final_bom_rows,
+    columns=[
+        "Category",
+        "Part Number",
+        "Description",
+        "Quantity",
+        "UOM",
+        "Unit Price",
+        "Amount",
     ]
-].copy()
+)
 
-optional_export = bom_with_pricing[
-    bom_with_pricing["Optional"].astype(str).str.lower() == "yes"
-].copy()
+st.dataframe(
+    final_bom_df,
+    use_container_width=True,
+    hide_index=True
+)
 
-summary_df = pd.DataFrame(configuration_summary)
+# ============================================================
+# COMMERCIAL SUMMARY
+# ============================================================
 
-cost_summary = pd.DataFrame([
+st.header("8️⃣ Final BOM & Commercial Summary")
+
+commercial_rows = [{
+    "Part Number": "XXX",
+    "Description": f"Single Rack MDC — {selected_config}",
+    "Quantity": 1,
+    "Unit Price": format_price(standard_price),
+    "Amount": format_price(standard_price),
+}]
+
+for item in selected_optional_items:
+    commercial_rows.append({
+        "Part Number": item["part_number"],
+        "Description": item["description"],
+        "Quantity": item["quantity"],
+        "Unit Price": format_price(item["unit_price"]),
+        "Amount": (
+            format_price(item["amount"])
+            if item["amount"] is not None
+            else "XXX"
+        ),
+    })
+
+commercial_df = pd.DataFrame(commercial_rows)
+
+st.dataframe(
+    commercial_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+summary_df = pd.DataFrame([
+    {"Metric": "Customer Name", "Value": customer_name or "—"},
+    {"Metric": "Customer Place", "Value": customer_place or "—"},
+    {"Metric": "MDC Type", "Value": mdc_type},
+    {"Metric": "Selected Configuration", "Value": selected_config},
+    {"Metric": "Problem / Requirement", "Value": problem_statement or "—"},
+    {"Metric": "Proposed Solution", "Value": proposed_solution or "—"},
+    {"Metric": "Standard Configuration Cost", "Value": format_price(standard_price)},
     {
-        "Cost Type": "Standard Components",
-        "Amount INR": standard_total if not pd.isna(standard_total) else "XXX",
-        "Amount Display Currency": (
-            display_standard_total if not pd.isna(display_standard_total) else "XXX"
+        "Metric": "Optional Components Cost",
+        "Value": (
+            format_price(optional_total)
+            if not unknown_optional_price
+            else "XXX"
         ),
     },
     {
-        "Cost Type": "Optional Components",
-        "Amount INR": optional_total if not pd.isna(optional_total) else "XXX",
-        "Amount Display Currency": (
-            display_optional_total if not pd.isna(display_optional_total) else "XXX"
-        ),
+        "Metric": "TOTAL COST",
+        "Value": format_price(total_cost) if total_cost is not None else "XXX",
     },
     {
-        "Cost Type": "Total",
-        "Amount INR": known_total if not pd.isna(known_total) else "XXX",
-        "Amount Display Currency": (
-            display_total if not pd.isna(display_total) else "XXX"
-        ),
+        "Metric": "FINAL SELLING PRICE",
+        "Value": format_price(selling_price) if selling_price is not None else "XXX",
     },
 ])
 
-source_data = df.copy()
+st.subheader("💰 Cost & Price Summary")
 
-output = BytesIO()
+st.dataframe(
+    summary_df,
+    use_container_width=True,
+    hide_index=True
+)
 
-try:
+# ============================================================
+# EXCEL EXPORT
+# ============================================================
+
+st.header("9️⃣ Excel Export")
+
+customer_details_df = pd.DataFrame([
+    {"Field": "Customer Name", "Value": customer_name},
+    {"Field": "Customer Place", "Value": customer_place},
+    {"Field": "MDC Type", "Value": mdc_type},
+    {"Field": "Selected Configuration", "Value": selected_config},
+    {"Field": "Configuration Description", "Value": selected_config_data["title"]},
+    {"Field": "Problem / Requirement", "Value": problem_statement},
+    {"Field": "Proposed Solution", "Value": proposed_solution},
+])
+
+bom_without_price_df = final_bom_df[
+    ["Category", "Part Number", "Description", "Quantity", "UOM"]
+].copy()
+
+bom_with_price_df = final_bom_df.copy()
+
+price_summary_rows = [
+    {"Section": "Customer", "Item": "Customer Name", "Value": customer_name},
+    {"Section": "Customer", "Item": "Customer Place", "Value": customer_place},
+    {"Section": "Configuration", "Item": "MDC Type", "Value": mdc_type},
+    {"Section": "Configuration", "Item": "Selected Configuration", "Value": selected_config},
+    {"Section": "Configuration", "Item": "Description", "Value": selected_config_data["title"]},
+    {"Section": "Cost", "Item": "Standard Configuration Cost", "Value": format_price(standard_price)},
+    {
+        "Section": "Cost",
+        "Item": "Optional Components Cost",
+        "Value": format_price(optional_total) if not unknown_optional_price else "XXX",
+    },
+    {
+        "Section": "Cost",
+        "Item": "TOTAL COST",
+        "Value": format_price(total_cost) if total_cost is not None else "XXX",
+    },
+    {
+        "Section": "Price",
+        "Item": "FINAL SELLING PRICE",
+        "Value": format_price(selling_price) if selling_price is not None else "XXX",
+    },
+]
+
+pricing_factors_export_df = pd.DataFrame(pricing_factor_rows)
+pricing_factors_export_df["Percentage Added"] = pricing_factors_export_df[
+    "Percentage"
+].map(lambda x: "Baseline" if x == 0 else f"{x:.2f}%")
+pricing_factors_export_df = pricing_factors_export_df[
+    ["Layer", "Name", "Percentage Added"]
+]
+
+def create_excel_file(dataframes):
+    output = BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary_df.to_excel(
-            writer,
-            index=False,
-            sheet_name="Configuration Summary",
-        )
-
-        bom_with_pricing.to_excel(
-            writer,
-            index=False,
-            sheet_name="BOM_With_Pricing",
-        )
-
-        bom_without_pricing.to_excel(
-            writer,
-            index=False,
-            sheet_name="BOM_Without_Pricing",
-        )
-
-        optional_export.to_excel(
-            writer,
-            index=False,
-            sheet_name="Optional Components",
-        )
-
-        cost_summary.to_excel(
-            writer,
-            index=False,
-            sheet_name="Cost Summary",
-        )
-
-        source_data.to_excel(
-            writer,
-            index=False,
-            sheet_name="Imported Data",
-        )
-
-        style_workbook(writer)
+        for sheet_name, dataframe in dataframes.items():
+            dataframe.to_excel(
+                writer,
+                sheet_name=sheet_name[:31],
+                index=False
+            )
 
     output.seek(0)
+    return output
 
+excel_without_price = create_excel_file({
+    "Customer Details": customer_details_df,
+    "BOM": bom_without_price_df,
+})
+
+excel_with_price = create_excel_file({
+    "Customer Details": customer_details_df,
+    "BOM With Price": bom_with_price_df,
+    "Cost Summary": cost_df,
+    "Price Build-up": pricing_build_up_df,
+    "Pricing Factors": pricing_factors_export_df,
+    "Price Summary": pd.DataFrame(price_summary_rows),
+})
+
+download_col1, download_col2 = st.columns(2)
+
+with download_col1:
     st.download_button(
-        "⬇️ Download Complete BOM Excel",
-        data=output.getvalue(),
-        file_name="Eaton_MDC_BOM.xlsx",
+        "📥 Download BOM — Without Price",
+        data=excel_without_price,
+        file_name=f"Single_Rack_{selected_config}_BOM_Without_Price.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        key="download_without_price",
     )
 
-except Exception as e:
-    st.error(f"Could not create the Excel output: {e}")
+with download_col2:
+    st.download_button(
+        "📥 Download BOM — With Price",
+        data=excel_with_price,
+        file_name=f"Single_Rack_{selected_config}_BOM_With_Price.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_with_price",
+    )
 
 # ============================================================
-# DEBUG / DATA INSPECTION
+# FOOTER
 # ============================================================
-
-with st.expander("Technical: detected data structure"):
-    st.write("Automatic column mapping:")
-    st.json({k: v for k, v in mapping.items()})
-
-    st.write("Detected MDC types:")
-    st.write(types)
-
-    st.write("Detected configurations:")
-    for t in types:
-        st.write(f"**{t}:** {get_configs(df, t)}")
 
 st.divider()
+
 st.caption(
-    "The Excel workbook uploaded through the UI is the data source. "
-    "No online currency API is used, so the application can also operate "
-    "without internet access when Streamlit itself is available."
+    "MDC Configuration & BOM Generator | "
+    "Single Rack SKU/BOM database is driven by the supplied Excel workbook. "
+    "Prices remain separate in the Python PRICE MASTER."
 )
