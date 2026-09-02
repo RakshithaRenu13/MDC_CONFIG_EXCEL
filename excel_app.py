@@ -875,4 +875,120 @@ summary_data = [
 
     {
         "Component": "PDU",
-        "Cost": pdu_cos
+        "Cost": pdu_cost
+    },
+
+    {
+        "Component": "TOTAL",
+        "Cost": total_cost
+    }
+]
+
+
+summary_df = pd.DataFrame(summary_data)
+
+
+st.subheader("Cost Breakdown")
+
+summary_display = summary_df.copy()
+
+summary_display["Cost"] = summary_display["Cost"].apply(
+    lambda x: currency(x, currency_symbol)
+)
+
+st.table(summary_display)
+
+
+# ============================================================
+# CUSTOMER / PROJECT DETAILS
+# ============================================================
+
+st.header("6️⃣ Project Information")
+
+info_col1, info_col2 = st.columns(2)
+
+
+with info_col1:
+
+    st.write("**Customer:**")
+
+    st.write(
+        customer_name if customer_name else "Not specified"
+    )
+
+
+with info_col2:
+
+    st.write("**Project:**")
+
+    st.write(
+        project_name if project_name else "Not specified"
+    )
+
+
+st.write("**Selected Solution:**")
+
+st.write(selected_solution)
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+st.header("7️⃣ Export BOM")
+
+
+# Create Excel export
+excel_file = create_excel_file(
+    bom_df,
+    summary_df
+)
+
+
+st.download_button(
+    label="📥 Download BOM Excel",
+    data=excel_file,
+    file_name="MDC_BOM_Generated.xlsx",
+    mime=(
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet"
+    )
+)
+
+
+# ============================================================
+# DATA SOURCE INFORMATION
+# ============================================================
+
+with st.expander("📊 Excel Data Source"):
+
+    st.write(
+        f"**Workbook:** `{EXCEL_FILE}`"
+    )
+
+    st.write(
+        f"**Sheet:** `{SHEET_NAME}`"
+    )
+
+    st.write(
+        f"**Detected Solutions:** {len(solutions)}"
+    )
+
+    st.write(
+        f"**Optional Items:** {len(optional_items)}"
+    )
+
+    st.write(
+        f"**PDU Items:** {len(pdu_items)}"
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "MDC Rack BOM Generator • Data extracted from the supplied Excel configuration"
+)
