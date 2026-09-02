@@ -416,7 +416,7 @@ def extract_solutions(df):
                         qty,
 
                     "UOM":
-                        uom
+                        uom,
 
                     "Unit Price":
                         price,
@@ -535,7 +535,7 @@ def extract_optional_items(df):
                     excel_qty,
 
                 "UOM":
-                    uom
+                    uom,
 
                 "Unit Price":
                     price
