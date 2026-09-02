@@ -418,14 +418,14 @@ def extract_solutions(df):
                     "UOM":
                         uom,
 
-                    "Unit Price":
-                        price,
+                    # "Unit Price":
+                    #     price,
 
-                    "Amount":
-                        calculate_amount(
-                            price,
-                            qty
-                        )
+                    # "Amount":
+                    #     calculate_amount(
+                    #         price,
+                    #         qty
+                    #     )
                 }
             )
 
