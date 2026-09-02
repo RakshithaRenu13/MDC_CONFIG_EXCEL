@@ -1152,21 +1152,21 @@ pdu_quantity = 0
 pdu_amount = 0
 
 
-if pdu_items:
+# if pdu_items:
 
-    pdu_labels = []
+#     pdu_labels = []
 
 
-    for item in pdu_items:
+#     for item in pdu_items:
 
-        pdu_labels.append(
-            f"{item['Part Number']} | "
-            f"{item['Description']} | "
-            f"{item['Type']} | "
-            f"C13: {item['C13']} | "
-            f"C19: {item['C19']} | "
-            f"{format_price(item['Unit Price'])}"
-        )
+#         pdu_labels.append(
+#             f"{item['Part Number']} | "
+#             f"{item['Description']} | "
+#             f"{item['Type']} | "
+#             f"C13: {item['C13']} | "
+#             f"C19: {item['C19']} | "
+#             f"{format_price(item['Unit Price'])}"
+#         )
 
 
     selected_pdu_index = st.selectbox(
