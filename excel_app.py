@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+import requests
 from io import BytesIO
 
 
@@ -17,7 +18,7 @@ st.set_page_config(
 
 
 # ============================================================
-# CONFIGURATION
+# FILE CONFIGURATION
 # ============================================================
 
 EXCEL_FILE = "1 Rack SKU'S - MDC BOQ (01.09.2026).xlsx"
@@ -29,69 +30,129 @@ SHEET_NAME = "1R MDC (4 Configs) BOM"
 # ============================================================
 
 def clean_text(value):
-    """Convert Excel values into clean strings."""
+    """Clean Excel cell value."""
+
     if pd.isna(value):
         return ""
-    return str(value).replace("\n", " ").replace("\xa0", " ").strip()
+
+    return (
+        str(value)
+        .replace("\n", " ")
+        .replace("\xa0", " ")
+        .strip()
+    )
+
+
+def is_numeric_price(value):
+    """Return True if value can be converted to a number."""
+
+    if isinstance(value, bool):
+        return False
+
+    if isinstance(value, (int, float)):
+        return True
+
+    if isinstance(value, str):
+
+        try:
+            float(
+                value
+                .strip()
+                .replace(",", "")
+            )
+
+            return True
+
+        except (ValueError, TypeError):
+            return False
+
+    return False
+
+
+def numeric_price(value):
+    """Convert numeric price to float."""
+
+    if not is_numeric_price(value):
+        return None
+
+    return float(
+        str(value)
+        .strip()
+        .replace(",", "")
+    )
 
 
 def to_number(value):
-    """Safely convert Excel value to float."""
+    """Safely convert Excel value to number."""
+
     if pd.isna(value) or value == "":
         return 0.0
 
     try:
+
         if isinstance(value, (int, float)):
             return float(value)
 
-        text = str(value).replace(",", "").strip()
-
-        return float(text)
+        return float(
+            str(value)
+            .replace(",", "")
+            .strip()
+        )
 
     except Exception:
+
         return 0.0
 
 
-def is_solution_header(value):
-    """Check whether a cell contains a solution heading."""
-    text = clean_text(value).upper()
-    return "SOLUTION" in text
-
-
-def normalize_solution_name(text):
+def calculate_amount(unit_price, quantity):
     """
-    Convert:
-    SOLUTION 1
-    (3.5 kw Cooling W/o Dehumidifier)
-
-    into a clean display name.
+    Amount = Quantity × Unit Price
     """
-    text = clean_text(text)
 
-    text = re.sub(r"\s+", " ", text)
+    price = numeric_price(unit_price)
 
-    return text
+    if price is None:
+        return None
+
+    try:
+        qty = float(quantity)
+    except Exception:
+        qty = 0
+
+    return price * qty
 
 
-def is_part_number(value):
-    """
-    Identify a probable part number.
+# ============================================================
+# LIVE CURRENCY
+# ============================================================
 
-    Allows:
-    801029209
-    CTO3M002
-    HRD-XH1C
-    etc.
-    """
-    value = clean_text(value)
+@st.cache_data(ttl=3600)
+def get_live_exchange_rate(from_currency, to_currency):
 
-    if not value:
-        return False
+    if from_currency == to_currency:
+        return 1.0
 
-    # Typical SKU / part number patterns
-    return bool(
-        re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]{2,30}$", value)
-    )
+    try:
+
+        url = (
+            f"https://api.frankfurter.dev/v2/rate/"
+            f"{from_currency}/{to_currency}"
+        )
+
+        response = requests.get(
+            url,
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return float(data["rate"])
+
+    except Exception:
+
+        return None
 
 
 # ============================================================
@@ -102,17 +163,45 @@ def is_part_number(value):
 def load_excel():
 
     if not os.path.exists(EXCEL_FILE):
+
         raise FileNotFoundError(
-            f"Excel file not found: {EXCEL_FILE}"
+            f"Excel file not found:\n{EXCEL_FILE}"
         )
 
-    df = pd.read_excel(
+    return pd.read_excel(
         EXCEL_FILE,
         sheet_name=SHEET_NAME,
         header=None
     )
 
-    return df
+
+# ============================================================
+# DETECT SOLUTION HEADERS
+# ============================================================
+
+def find_solution_headers(df):
+
+    headers = []
+
+    for row in range(len(df)):
+
+        for col in range(len(df.columns)):
+
+            value = clean_text(
+                df.iloc[row, col]
+            )
+
+            if "SOLUTION" in value.upper():
+
+                headers.append(
+                    {
+                        "row": row,
+                        "col": col,
+                        "text": value
+                    }
+                )
+
+    return headers
 
 
 # ============================================================
@@ -123,139 +212,211 @@ def extract_solutions(df):
 
     solutions = {}
 
-    # --------------------------------------------------------
-    # Find all cells containing "SOLUTION"
-    # --------------------------------------------------------
+    headers = find_solution_headers(df)
 
-    solution_locations = []
-
-    for row_idx in range(len(df)):
-
-        for col_idx in range(len(df.columns)):
-
-            value = clean_text(df.iloc[row_idx, col_idx])
-
-            if is_solution_header(value):
-
-                solution_locations.append(
-                    (row_idx, col_idx, value)
-                )
+    if not headers:
+        return solutions
 
     # --------------------------------------------------------
-    # Each solution occupies a block.
-    # The current Excel has two blocks:
-    #
-    # LEFT  -> columns 0-4
-    # RIGHT -> columns 5-9
-    #
-    # This function detects the starting column dynamically.
+    # Remove duplicate headers occurring in same block
     # --------------------------------------------------------
 
-    for index, (header_row, header_col, header_text) in enumerate(
-        solution_locations
-    ):
+    processed = []
 
-        # Determine block start.
-        # Header is normally at first column of block.
-        block_start = header_col
+    for header in headers:
 
-        # Expected columns:
-        # Part Number, Description, Qty, UOM, Price
-        part_col = block_start
-        desc_col = block_start + 1
-        qty_col = block_start + 2
-        uom_col = block_start + 3
-        price_col = block_start + 4
+        row = header["row"]
+        col = header["col"]
 
-        # Check whether columns exist
+        duplicate = False
+
+        for existing in processed:
+
+            if (
+                existing["row"] == row
+                and abs(existing["col"] - col) <= 4
+            ):
+                duplicate = True
+                break
+
+        if not duplicate:
+
+            processed.append(header)
+
+    # --------------------------------------------------------
+    # Process each solution
+    # --------------------------------------------------------
+
+    for index, header in enumerate(processed):
+
+        start_row = header["row"]
+        start_col = header["col"]
+
+        # ----------------------------------------------------
+        # Expected structure:
+        #
+        # Part Number
+        # Description
+        # QTY
+        # UOM
+        # Price
+        # ----------------------------------------------------
+
+        part_col = start_col
+        desc_col = start_col + 1
+        qty_col = start_col + 2
+        uom_col = start_col + 3
+        price_col = start_col + 4
+
         if price_col >= len(df.columns):
             continue
 
         # ----------------------------------------------------
-        # Find where this solution ends.
-        # It ends before:
-        #   - next SOLUTION
-        #   - OPTIONAL section
-        #   - blank boundary
+        # Determine end row
         # ----------------------------------------------------
 
-        next_boundary = len(df)
+        end_row = len(df)
 
-        for r in range(header_row + 1, len(df)):
+        for r in range(start_row + 1, len(df)):
 
-            row_values = [
+            row_text = " ".join(
                 clean_text(df.iloc[r, c])
                 for c in range(len(df.columns))
-            ]
+            ).upper()
 
-            joined = " ".join(row_values).upper()
-
-            if r > header_row and (
-                "SOLUTION" in joined
-                or "OTHER OPTIONAL ITEMS" in joined
-                or "SINGLE PHASE PDU" in joined
+            # Stop at major next section
+            if (
+                "OTHER OPTIONAL ITEMS" in row_text
+                or "SINGLE PHASE PDU" in row_text
             ):
-                next_boundary = r
+                end_row = r
                 break
 
+            # Stop at next solution that belongs to same block
+            if r > start_row:
+
+                solution_found = False
+
+                for c in range(len(df.columns)):
+
+                    cell = clean_text(
+                        df.iloc[r, c]
+                    ).upper()
+
+                    if "SOLUTION" in cell:
+
+                        # Only stop if it is another header
+                        if re.search(
+                            r"SOLUTION\s*\d+",
+                            cell
+                        ):
+
+                            solution_found = True
+                            break
+
+                if solution_found:
+
+                    end_row = r
+                    break
+
         # ----------------------------------------------------
-        # Extract rows
+        # Extract BOM
         # ----------------------------------------------------
 
         items = []
 
-        for r in range(header_row + 1, next_boundary):
+        for r in range(
+            start_row + 1,
+            end_row
+        ):
 
-            part_number = clean_text(df.iloc[r, part_col])
-            description = clean_text(df.iloc[r, desc_col])
-            qty = to_number(df.iloc[r, qty_col])
-            uom = clean_text(df.iloc[r, uom_col])
-            price = to_number(df.iloc[r, price_col])
+            part_number = clean_text(
+                df.iloc[r, part_col]
+            )
 
-            # Ignore header rows
-            if part_number.upper() == "PART NUMBER":
+            description = clean_text(
+                df.iloc[r, desc_col]
+            )
+
+            qty = to_number(
+                df.iloc[r, qty_col]
+            )
+
+            uom = clean_text(
+                df.iloc[r, uom_col]
+            )
+
+            price = to_number(
+                df.iloc[r, price_col]
+            )
+
+            # Skip empty rows
+            if (
+                not part_number
+                and not description
+            ):
                 continue
 
-            # Ignore completely empty rows
-            if not part_number and not description:
+            # Skip column headers
+            if (
+                part_number.upper()
+                in [
+                    "PART NUMBER",
+                    "PART NO",
+                    "SKU"
+                ]
+            ):
                 continue
 
-            # Need at least a description
+            if (
+                description.upper()
+                in [
+                    "DESCRIPTION",
+                    "ITEM DESCRIPTION"
+                ]
+            ):
+                continue
+
+            # Skip section headings
+            if (
+                "OPTIONAL ITEMS" in description.upper()
+                or "SINGLE PHASE PDU" in description.upper()
+            ):
+                continue
+
+            # Description must exist
             if not description:
                 continue
 
-            # Avoid accidentally reading another section
-            if "OPTIONAL ITEMS" in description.upper():
-                continue
-
-            if "SINGLE PHASE PDU" in description.upper():
-                continue
-
-            items.append({
-                "Part Number": part_number,
-                "Description": description,
-                "Qty": qty,
-                "UOM": uom,
-                "Unit Price": price,
-                "Amount": qty * price
-            })
-
-        # ----------------------------------------------------
-        # Store only valid solution
-        # ----------------------------------------------------
+            items.append(
+                {
+                    "Part Number": part_number,
+                    "Description": description,
+                    "Qty": qty,
+                    "UOM": uom,
+                    "Unit Price": price,
+                    "Amount": calculate_amount(
+                        price,
+                        qty
+                    )
+                }
+            )
 
         if items:
 
-            # Make key unique
-            solution_key = normalize_solution_name(header_text)
+            solution_name = clean_text(
+                header["text"]
+            )
 
-            solutions[solution_key] = items
+            solutions[
+                solution_name
+            ] = items
 
     return solutions
 
 
 # ============================================================
-# EXTRACT OPTIONAL ITEMS
+# EXTRACT OPTIONAL COMPONENTS
 # ============================================================
 
 def extract_optional_items(df):
@@ -264,58 +425,95 @@ def extract_optional_items(df):
 
     optional_row = None
 
+    # --------------------------------------------------------
     # Find optional section
+    # --------------------------------------------------------
+
     for r in range(len(df)):
 
-        for c in range(len(df.columns)):
+        row_text = " ".join(
+            clean_text(df.iloc[r, c])
+            for c in range(len(df.columns))
+        ).upper()
 
-            value = clean_text(df.iloc[r, c]).upper()
+        if "OTHER OPTIONAL ITEMS" in row_text:
 
-            if "OTHER OPTIONAL ITEMS" in value:
-                optional_row = r
-                break
-
-        if optional_row is not None:
+            optional_row = r
             break
 
     if optional_row is None:
+
         return optional_items
 
-    # Optional section is normally first 5 columns
+    # --------------------------------------------------------
+    # Standard columns
+    # --------------------------------------------------------
+
     part_col = 0
     desc_col = 1
     qty_col = 2
     uom_col = 3
     price_col = 4
 
-    for r in range(optional_row + 1, len(df)):
+    # --------------------------------------------------------
+    # Read optional rows
+    # --------------------------------------------------------
 
-        # Stop when PDU section starts
+    for r in range(
+        optional_row + 1,
+        len(df)
+    ):
+
         row_text = " ".join(
             clean_text(df.iloc[r, c])
             for c in range(len(df.columns))
         ).upper()
 
+        # Stop at PDU section
         if "SINGLE PHASE PDU" in row_text:
             break
 
-        part_number = clean_text(df.iloc[r, part_col])
-        description = clean_text(df.iloc[r, desc_col])
-        qty = to_number(df.iloc[r, qty_col])
-        uom = clean_text(df.iloc[r, uom_col])
-        price = to_number(df.iloc[r, price_col])
+        part_number = clean_text(
+            df.iloc[r, part_col]
+        )
+
+        description = clean_text(
+            df.iloc[r, desc_col]
+        )
+
+        excel_qty = to_number(
+            df.iloc[r, qty_col]
+        )
+
+        uom = clean_text(
+            df.iloc[r, uom_col]
+        )
+
+        price = to_number(
+            df.iloc[r, price_col]
+        )
 
         if not description:
             continue
 
-        optional_items.append({
-            "Part Number": part_number,
-            "Description": description,
-            "Qty": qty,
-            "UOM": uom,
-            "Unit Price": price,
-            "Amount": qty * price
-        })
+        if (
+            description.upper()
+            in [
+                "DESCRIPTION",
+                "ITEM DESCRIPTION"
+            ]
+        ):
+            continue
+
+        optional_items.append(
+            {
+                "Part Number": part_number,
+                "Description": description,
+                "Excel Qty": excel_qty,
+                "UOM": uom,
+                "Unit Price": price
+            }
+        )
 
     return optional_items
 
@@ -331,7 +529,7 @@ def extract_pdu_items(df):
     pdu_row = None
 
     # --------------------------------------------------------
-    # Find PDU header
+    # Find PDU section
     # --------------------------------------------------------
 
     for r in range(len(df)):
@@ -350,79 +548,84 @@ def extract_pdu_items(df):
         return pdu_items
 
     # --------------------------------------------------------
-    # PDU structure:
-    #
-    # Part Number
-    # Description
-    # C13
-    # C19
-    # TYPE
-    # Price
-    # --------------------------------------------------------
-
-    for r in range(pdu_row + 1, len(df)):
-
-        part_number = clean_text(df.iloc[r, 0])
-        description = clean_text(df.iloc[r, 1])
-        c13 = to_number(df.iloc[r, 2])
-        c19 = to_number(df.iloc[r, 3])
-        pdu_type = clean_text(df.iloc[r, 4])
-        price = to_number(df.iloc[r, 5])
-
-        if not part_number or not description:
-            continue
-
-        # Ignore accidental rows
-        if part_number.upper() in [
-            "PART NUMBER",
-            "DESCRIPTION"
-        ]:
-            continue
-
-        pdu_items.append({
-            "Part Number": part_number,
-            "Description": description,
-            "C13": int(c13) if c13.is_integer() else c13,
-            "C19": int(c19) if c19.is_integer() else c19,
-            "Type": pdu_type,
-            "Unit Price": price,
-            "Amount": price
-        })
-
-    # --------------------------------------------------------
-    # Fill down PDU type where Excel has blank merged cells
+    # Read PDU data
     # --------------------------------------------------------
 
     previous_type = ""
 
-    for item in pdu_items:
+    for r in range(
+        pdu_row + 1,
+        len(df)
+    ):
 
-        if item["Type"]:
-            previous_type = item["Type"]
+        part_number = clean_text(
+            df.iloc[r, 0]
+        )
+
+        description = clean_text(
+            df.iloc[r, 1]
+        )
+
+        c13 = to_number(
+            df.iloc[r, 2]
+        )
+
+        c19 = to_number(
+            df.iloc[r, 3]
+        )
+
+        pdu_type = clean_text(
+            df.iloc[r, 4]
+        )
+
+        price = to_number(
+            df.iloc[r, 5]
+        )
+
+        if not part_number:
+            continue
+
+        if not description:
+            continue
+
+        if (
+            part_number.upper()
+            == "PART NUMBER"
+        ):
+            continue
+
+        # Excel may use merged cells for type
+        if pdu_type:
+
+            previous_type = pdu_type
 
         else:
-            item["Type"] = previous_type
+
+            pdu_type = previous_type
+
+        pdu_items.append(
+            {
+                "Part Number": part_number,
+                "Description": description,
+                "C13": int(c13)
+                if float(c13).is_integer()
+                else c13,
+                "C19": int(c19)
+                if float(c19).is_integer()
+                else c19,
+                "Type": pdu_type,
+                "Unit Price": price
+            }
+        )
 
     return pdu_items
 
 
 # ============================================================
-# FORMAT CURRENCY
+# CREATE EXCEL WORKBOOK
 # ============================================================
 
-def currency(value, symbol="₹"):
-
-    try:
-        return f"{symbol}{value:,.2f}"
-    except Exception:
-        return f"{symbol}0.00"
-
-
-# ============================================================
-# EXCEL EXPORT
-# ============================================================
-
-def create_excel_file(bom_df, summary_df):
+def create_excel_file(dataframes):
 
     output = BytesIO()
 
@@ -431,32 +634,17 @@ def create_excel_file(bom_df, summary_df):
         engine="openpyxl"
     ) as writer:
 
-        bom_df.to_excel(
-            writer,
-            sheet_name="BOM",
-            index=False
-        )
+        for sheet_name, dataframe in dataframes.items():
 
-        summary_df.to_excel(
-            writer,
-            sheet_name="Summary",
-            index=False
-        )
+            dataframe.to_excel(
+                writer,
+                sheet_name=sheet_name[:31],
+                index=False
+            )
 
     output.seek(0)
 
     return output
-
-
-# ============================================================
-# APP
-# ============================================================
-
-st.title("🖥️ MDC Rack BOM Generator")
-
-st.caption(
-    "BOM and pricing are extracted directly from the uploaded Excel configuration."
-)
 
 
 # ============================================================
@@ -475,19 +663,21 @@ try:
 
 except Exception as e:
 
-    st.error(f"Unable to load Excel data: {e}")
+    st.error(
+        f"❌ Error loading Excel:\n\n{e}"
+    )
 
     st.stop()
 
 
 # ============================================================
-# DATA VALIDATION
+# VALIDATION
 # ============================================================
 
 if not solutions:
 
     st.error(
-        "No solution configurations were detected in the Excel file."
+        "❌ No solution configurations were detected."
     )
 
     st.stop()
@@ -497,97 +687,181 @@ if not solutions:
 # SIDEBAR
 # ============================================================
 
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.title("⚙️ Configuration")
 
 
-# ------------------------------------------------------------
-# Customer
-# ------------------------------------------------------------
+# ============================================================
+# CUSTOMER DETAILS
+# ============================================================
 
 customer_name = st.sidebar.text_input(
     "Customer Name",
     placeholder="Enter customer name"
 )
 
+customer_place = st.sidebar.text_input(
+    "Customer Place",
+    placeholder="Enter customer location"
+)
 
-project_name = st.sidebar.text_input(
-    "Project Name",
-    placeholder="Enter project name"
+problem_statement = st.sidebar.text_area(
+    "Problem / Requirement",
+    placeholder="Enter customer requirement"
+)
+
+proposed_solution = st.sidebar.text_area(
+    "Proposed Solution",
+    placeholder="Enter proposed solution"
 )
 
 
-# ------------------------------------------------------------
-# Currency
-# ------------------------------------------------------------
+# ============================================================
+# CURRENCY
+# ============================================================
 
-currency_option = st.sidebar.selectbox(
+selected_currency = st.sidebar.selectbox(
     "Currency",
-    ["INR", "USD"]
+    [
+        "INR",
+        "USD"
+    ]
 )
 
 
-usd_rate = 1.0
+# ------------------------------------------------------------
+# Exchange rate
+# ------------------------------------------------------------
 
-if currency_option == "USD":
+if selected_currency == "USD":
 
-    usd_rate = st.sidebar.number_input(
-        "INR → USD Conversion Rate",
-        min_value=0.0001,
-        value=0.0119,
-        step=0.0001,
-        format="%.4f"
+    live_rate = get_live_exchange_rate(
+        "INR",
+        "USD"
+    )
+
+    if live_rate is not None:
+
+        exchange_rate = st.sidebar.number_input(
+            "INR → USD Exchange Rate",
+            min_value=0.000001,
+            value=float(live_rate),
+            step=0.0001,
+            format="%.6f"
+        )
+
+        st.sidebar.caption(
+            f"Live rate loaded: 1 INR ≈ {live_rate:.6f} USD"
+        )
+
+    else:
+
+        exchange_rate = st.sidebar.number_input(
+            "INR → USD Exchange Rate",
+            min_value=0.000001,
+            value=0.0119,
+            step=0.0001,
+            format="%.6f"
+        )
+
+else:
+
+    exchange_rate = 1.0
+
+
+def convert_currency(amount):
+
+    if amount is None:
+        return None
+
+    return float(amount) * exchange_rate
+
+
+def currency_symbol():
+
+    if selected_currency == "USD":
+        return "$"
+
+    return "₹"
+
+
+def format_price(amount):
+
+    if amount is None:
+        return "XXX"
+
+    converted = convert_currency(amount)
+
+    return (
+        f"{currency_symbol()} "
+        f"{converted:,.2f}"
     )
 
 
-def convert_price(value):
+# ============================================================
+# HEADER
+# ============================================================
 
-    if currency_option == "INR":
-        return value
+st.title("🖥️ MDC Rack BOM Generator")
 
-    return value * usd_rate
-
-
-currency_symbol = "₹" if currency_option == "INR" else "$"
+st.caption(
+    "BOM configuration, quantities and costs are extracted "
+    "from the supplied Excel workbook."
+)
 
 
 # ============================================================
-# SOLUTION SELECTION
+# STEP 1 — SOLUTION
 # ============================================================
 
-st.header("1️⃣ Select MDC Solution")
+st.header("1️⃣ MDC Solution")
 
-solution_names = list(solutions.keys())
+
+solution_names = list(
+    solutions.keys()
+)
 
 selected_solution = st.selectbox(
-    "Available Solutions",
+    "Select Solution",
     solution_names
 )
 
 
-selected_items = solutions[selected_solution]
+selected_solution_items = solutions[
+    selected_solution
+]
 
 
 # ============================================================
-# SOLUTION DETAILS
+# BASE SOLUTION BOM
 # ============================================================
 
-st.subheader("Selected Solution")
+st.subheader(
+    "📦 Base Solution BOM"
+)
 
-solution_df = pd.DataFrame(selected_items)
 
-display_solution_df = solution_df.copy()
+base_df = pd.DataFrame(
+    selected_solution_items
+)
 
-display_solution_df["Unit Price"] = display_solution_df[
+
+display_base_df = base_df.copy()
+
+display_base_df[
     "Unit Price"
-].apply(convert_price)
+] = display_base_df[
+    "Unit Price"
+].apply(format_price)
 
-display_solution_df["Amount"] = display_solution_df[
+display_base_df[
     "Amount"
-].apply(convert_price)
+] = display_base_df[
+    "Amount"
+].apply(format_price)
 
 
 st.dataframe(
-    display_solution_df,
+    display_base_df,
     use_container_width=True,
     hide_index=True
 )
@@ -597,389 +871,1707 @@ st.dataframe(
 # BASE COST
 # ============================================================
 
-base_cost_inr = sum(
-    item["Amount"]
-    for item in selected_items
+base_cost = sum(
+    numeric_price(item["Amount"]) or 0
+    for item in selected_solution_items
 )
-
-base_cost = convert_price(base_cost_inr)
 
 
 # ============================================================
-# OPTIONAL ITEMS
+# STEP 2 — OPTIONAL COMPONENTS
 # ============================================================
 
 st.header("2️⃣ Optional Components")
 
-selected_optional = []
+st.info(
+    "Select an optional component and enter its required quantity. "
+    "Amount = Quantity × Unit Price."
+)
+
+
+selected_optional_items = []
+
 
 if optional_items:
 
-    for index, item in enumerate(optional_items):
-
-        label = (
-            f"{item['Part Number']} — "
-            f"{item['Description']} "
-            f"({currency(convert_price(item['Unit Price']), currency_symbol)})"
-        )
-
-        checked = st.checkbox(
-            label,
-            key=f"optional_{index}"
-        )
-
-        if checked:
-
-            selected_optional.append(item)
-
-else:
-
-    st.info("No optional components were found in the Excel file.")
-
-
-optional_cost_inr = sum(
-    item["Amount"]
-    for item in selected_optional
-)
-
-optional_cost = convert_price(optional_cost_inr)
-
-
-# ============================================================
-# PDU SELECTION
-# ============================================================
-
-st.header("3️⃣ PDU Selection")
-
-selected_pdu = None
-
-if pdu_items:
-
-    pdu_options = [
-        (
-            f"{item['Part Number']} — "
-            f"{item['Description']} — "
-            f"{item['Type']} — "
-            f"C13: {item['C13']} / "
-            f"C19: {item['C19']} — "
-            f"{currency(convert_price(item['Unit Price']), currency_symbol)}"
-        )
-        for item in pdu_items
-    ]
-
-    selected_pdu_index = st.selectbox(
-        "Select Single Phase PDU",
-        range(len(pdu_items)),
-        format_func=lambda i: pdu_options[i]
+    # Header row
+    h1, h2, h3, h4, h5 = st.columns(
+        [0.5, 3.8, 1.2, 1.2, 1.5]
     )
 
-    selected_pdu = pdu_items[selected_pdu_index]
+    with h1:
+        st.write("**✓**")
+
+    with h2:
+        st.write("**Component**")
+
+    with h3:
+        st.write("**Unit Cost**")
+
+    with h4:
+        st.write("**Quantity**")
+
+    with h5:
+        st.write("**Amount**")
+
+
+    for index, item in enumerate(
+        optional_items
+    ):
+
+        col1, col2, col3, col4, col5 = st.columns(
+            [0.5, 3.8, 1.2, 1.2, 1.5]
+        )
+
+        with col1:
+
+            selected = st.checkbox(
+                "",
+                key=f"optional_select_{index}"
+            )
+
+        with col2:
+
+            st.write(
+                f"**{item['Description']}**"
+            )
+
+            if item["Part Number"]:
+
+                st.caption(
+                    f"Part Number: {item['Part Number']}"
+                )
+
+        with col3:
+
+            st.write(
+                format_price(
+                    item["Unit Price"]
+                )
+            )
+
+        with col4:
+
+            if selected:
+
+                quantity = st.number_input(
+                    "Qty",
+                    min_value=1,
+                    max_value=10000,
+                    value=1,
+                    step=1,
+                    key=f"optional_qty_{index}"
+                )
+
+            else:
+
+                quantity = 0
+
+        with col5:
+
+            if selected:
+
+                amount = calculate_amount(
+                    item["Unit Price"],
+                    quantity
+                )
+
+                st.write(
+                    f"**{format_price(amount)}**"
+                )
+
+            else:
+
+                amount = 0
+
+        if selected:
+
+            selected_optional_items.append(
+                {
+                    "Part Number":
+                        item["Part Number"],
+
+                    "Description":
+                        item["Description"],
+
+                    "Quantity":
+                        quantity,
+
+                    "UOM":
+                        item["UOM"]
+                        if item["UOM"]
+                        else "EA",
+
+                    "Unit Price":
+                        item["Unit Price"],
+
+                    "Amount":
+                        amount
+                }
+            )
 
 else:
 
     st.warning(
-        "No PDU items were detected in the Excel file."
+        "No optional components found."
     )
 
 
-pdu_cost_inr = (
-    selected_pdu["Amount"]
-    if selected_pdu
-    else 0
+# ============================================================
+# OPTIONAL SUMMARY
+# ============================================================
+
+st.subheader(
+    "📋 Selected Optional Components"
 )
 
-pdu_cost = convert_price(pdu_cost_inr)
+
+if selected_optional_items:
+
+    optional_summary_df = pd.DataFrame(
+        selected_optional_items
+    )
+
+    display_optional_df = optional_summary_df.copy()
+
+    display_optional_df[
+        "Unit Price"
+    ] = display_optional_df[
+        "Unit Price"
+    ].apply(format_price)
+
+    display_optional_df[
+        "Amount"
+    ] = display_optional_df[
+        "Amount"
+    ].apply(format_price)
+
+    st.dataframe(
+        display_optional_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "No optional components selected."
+    )
 
 
-# ============================================================
-# TOTAL COST
-# ============================================================
-
-total_cost_inr = (
-    base_cost_inr
-    + optional_cost_inr
-    + pdu_cost_inr
+optional_total = sum(
+    item["Amount"]
+    for item in selected_optional_items
 )
 
-total_cost = convert_price(total_cost_inr)
+
+# ============================================================
+# STEP 3 — PDU SELECTION
+# ============================================================
+
+st.header("3️⃣ PDU Selection")
+
+
+selected_pdu = None
+pdu_quantity = 0
+pdu_amount = 0
+
+
+if pdu_items:
+
+    pdu_labels = []
+
+    for item in pdu_items:
+
+        label = (
+            f"{item['Part Number']} | "
+            f"{item['Description']} | "
+            f"{item['Type']} | "
+            f"C13: {item['C13']} | "
+            f"C19: {item['C19']} | "
+            f"{format_price(item['Unit Price'])}"
+        )
+
+        pdu_labels.append(label)
+
+
+    selected_pdu_index = st.selectbox(
+        "Select PDU",
+        range(len(pdu_items)),
+        format_func=lambda i:
+            pdu_labels[i]
+    )
+
+
+    selected_pdu = pdu_items[
+        selected_pdu_index
+    ]
+
+
+    # --------------------------------------------------------
+    # PDU details
+    # --------------------------------------------------------
+
+    pdu_info_1, pdu_info_2, pdu_info_3, pdu_info_4 = st.columns(4)
+
+    with pdu_info_1:
+
+        st.metric(
+            "Part Number",
+            selected_pdu["Part Number"]
+        )
+
+    with pdu_info_2:
+
+        st.metric(
+            "PDU Type",
+            selected_pdu["Type"]
+            if selected_pdu["Type"]
+            else "—"
+        )
+
+    with pdu_info_3:
+
+        st.metric(
+            "C13 / C19",
+            f"{selected_pdu['C13']} / {selected_pdu['C19']}"
+        )
+
+    with pdu_info_4:
+
+        st.metric(
+            "Unit Price",
+            format_price(
+                selected_pdu["Unit Price"]
+            )
+        )
+
+
+    # --------------------------------------------------------
+    # PDU QUANTITY
+    # --------------------------------------------------------
+
+    st.subheader(
+        "🔢 PDU Quantity"
+    )
+
+    pdu_quantity = st.number_input(
+        "Enter PDU Quantity",
+        min_value=1,
+        max_value=10000,
+        value=1,
+        step=1,
+        key="pdu_quantity"
+    )
+
+
+    # --------------------------------------------------------
+    # PDU AMOUNT
+    # --------------------------------------------------------
+
+    pdu_amount = calculate_amount(
+        selected_pdu["Unit Price"],
+        pdu_quantity
+    )
+
+
+    st.success(
+        f"PDU Amount = "
+        f"{pdu_quantity} × "
+        f"{format_price(selected_pdu['Unit Price'])} "
+        f"= **{format_price(pdu_amount)}**"
+    )
+
+
+else:
+
+    st.warning(
+        "No PDU items found in Excel."
+    )
 
 
 # ============================================================
-# COST SUMMARY
+# STEP 4 — TOTAL COST
 # ============================================================
 
 st.header("4️⃣ Cost Summary")
 
 
-col1, col2, col3, col4 = st.columns(4)
+total_cost = (
+    base_cost
+    + optional_total
+    + (pdu_amount or 0)
+)
 
 
-with col1:
-
-    st.metric(
-        "Base Solution",
-        currency(base_cost, currency_symbol)
-    )
+cost_col1, cost_col2, cost_col3, cost_col4 = st.columns(4)
 
 
-with col2:
-
-    st.metric(
-        "Optional Items",
-        currency(optional_cost, currency_symbol)
-    )
-
-
-with col3:
+with cost_col1:
 
     st.metric(
-        "PDU",
-        currency(pdu_cost, currency_symbol)
+        "Base Solution Cost",
+        format_price(base_cost)
     )
 
 
-with col4:
+with cost_col2:
 
     st.metric(
-        "Total BOM Cost",
-        currency(total_cost, currency_symbol)
+        "Optional Cost",
+        format_price(optional_total)
+    )
+
+
+with cost_col3:
+
+    st.metric(
+        "PDU Cost",
+        format_price(pdu_amount)
+    )
+
+
+with cost_col4:
+
+    st.metric(
+        "TOTAL COST",
+        format_price(total_cost)
     )
 
 
 # ============================================================
-# BUILD FINAL BOM
+# COST TABLE
 # ============================================================
 
-final_bom = []
-
-
-# ------------------------------------------------------------
-# Base solution
-# ------------------------------------------------------------
-
-for item in selected_items:
-
-    final_bom.append({
-        "Category": "Base Solution",
-        "Part Number": item["Part Number"],
-        "Description": item["Description"],
-        "Qty": item["Qty"],
-        "UOM": item["UOM"],
-        "Unit Price (INR)": item["Unit Price"],
-        "Amount (INR)": item["Amount"]
-    })
-
-
-# ------------------------------------------------------------
-# Optional components
-# ------------------------------------------------------------
-
-for item in selected_optional:
-
-    final_bom.append({
-        "Category": "Optional",
-        "Part Number": item["Part Number"],
-        "Description": item["Description"],
-        "Qty": item["Qty"],
-        "UOM": item["UOM"],
-        "Unit Price (INR)": item["Unit Price"],
-        "Amount (INR)": item["Amount"]
-    })
-
-
-# ------------------------------------------------------------
-# PDU
-# ------------------------------------------------------------
-
-if selected_pdu:
-
-    final_bom.append({
-        "Category": "PDU",
-        "Part Number": selected_pdu["Part Number"],
-        "Description": selected_pdu["Description"],
-        "Qty": 1,
-        "UOM": "EA",
-        "Unit Price (INR)": selected_pdu["Unit Price"],
-        "Amount (INR)": selected_pdu["Amount"]
-    })
-
-
-bom_df = pd.DataFrame(final_bom)
-
-
-# ============================================================
-# DISPLAY FINAL BOM
-# ============================================================
-
-st.header("5️⃣ Final BOM")
-
-
-if not bom_df.empty:
-
-    display_bom = bom_df.copy()
-
-    if currency_option == "USD":
-
-        display_bom["Unit Price (USD)"] = (
-            display_bom["Unit Price (INR)"] * usd_rate
-        )
-
-        display_bom["Amount (USD)"] = (
-            display_bom["Amount (INR)"] * usd_rate
-        )
-
-        display_bom = display_bom[
-            [
-                "Category",
-                "Part Number",
-                "Description",
-                "Qty",
-                "UOM",
-                "Unit Price (USD)",
-                "Amount (USD)"
-            ]
-        ]
-
-    else:
-
-        display_bom["Unit Price (INR)"] = (
-            display_bom["Unit Price (INR)"].round(2)
-        )
-
-        display_bom["Amount (INR)"] = (
-            display_bom["Amount (INR)"].round(2)
-        )
-
-    st.dataframe(
-        display_bom,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# ============================================================
-# SUMMARY TABLE
-# ============================================================
-
-summary_data = [
+cost_rows = [
 
     {
-        "Component": "Base Solution",
-        "Cost": base_cost
-    },
+        "Cost Item":
+            "Base Solution",
 
-    {
-        "Component": "Optional Components",
-        "Cost": optional_cost
-    },
+        "Quantity":
+            1,
 
-    {
-        "Component": "PDU",
-        "Cost": pdu_cost
-    },
+        "Unit Cost":
+            format_price(base_cost),
 
-    {
-        "Component": "TOTAL",
-        "Cost": total_cost
+        "Total Cost":
+            format_price(base_cost)
     }
 ]
 
 
-summary_df = pd.DataFrame(summary_data)
+for item in selected_optional_items:
+
+    cost_rows.append(
+        {
+            "Cost Item":
+                item["Description"],
+
+            "Quantity":
+                item["Quantity"],
+
+            "Unit Cost":
+                format_price(
+                    item["Unit Price"]
+                ),
+
+            "Total Cost":
+                format_price(
+                    item["Amount"]
+                )
+        }
+    )
 
 
-st.subheader("Cost Breakdown")
+if selected_pdu:
 
-summary_display = summary_df.copy()
+    cost_rows.append(
+        {
+            "Cost Item":
+                selected_pdu["Description"],
 
-summary_display["Cost"] = summary_display["Cost"].apply(
-    lambda x: currency(x, currency_symbol)
+            "Quantity":
+                pdu_quantity,
+
+            "Unit Cost":
+                format_price(
+                    selected_pdu["Unit Price"]
+                ),
+
+            "Total Cost":
+                format_price(
+                    pdu_amount
+                )
+        }
+    )
+
+
+cost_df = pd.DataFrame(
+    cost_rows
 )
 
-st.table(summary_display)
+
+st.subheader(
+    "💵 Cost Summary — Before Pricing Factors"
+)
+
+
+st.dataframe(
+    cost_df,
+    use_container_width=True,
+    hide_index=True
+)
 
 
 # ============================================================
-# CUSTOMER / PROJECT DETAILS
+# STEP 5 — COST → PRICE
 # ============================================================
 
-st.header("6️⃣ Project Information")
+st.header(
+    "5️⃣ Cost → Price Build-up"
+)
 
-info_col1, info_col2 = st.columns(2)
+
+st.info(
+    """
+    Each pricing layer is applied sequentially to the
+    running cumulative amount.
+
+    Example:
+
+    ₹1,000 + 15% = ₹1,150
+
+    ₹1,150 + 20% = ₹1,380
+
+    The final cumulative amount becomes the Selling Price.
+    """
+)
 
 
-with info_col1:
+# ============================================================
+# DEFAULT PRICING FACTORS
+# ============================================================
 
-    st.write("**Customer:**")
+DEFAULT_PRICING_FACTORS = [
 
-    st.write(
-        customer_name if customer_name else "Not specified"
+    (
+        "Factory Cost (COGS)",
+        0.0
+    ),
+
+    (
+        "Admin & R&D Overhead",
+        15.0
+    ),
+
+    (
+        "Marketing & Sales",
+        20.0
+    ),
+
+    (
+        "Manufacturer Profit",
+        15.0
+    ),
+
+    (
+        "Distribution & Retail",
+        45.0
+    )
+]
+
+
+pricing_factor_rows = []
+
+
+# ============================================================
+# PRICING FACTOR UI
+# ============================================================
+
+for factor_index, (
+    default_name,
+    default_percentage
+) in enumerate(
+    DEFAULT_PRICING_FACTORS,
+    start=1
+):
+
+    factor_col1, factor_col2 = st.columns(
+        [3, 1]
     )
 
 
-with info_col2:
+    with factor_col1:
 
-    st.write("**Project:**")
+        factor_name = st.text_input(
+            f"Layer {factor_index} — Name *",
+            value=default_name,
+            key=f"pricing_factor_name_{factor_index}"
+        )
 
-    st.write(
-        project_name if project_name else "Not specified"
+
+    with factor_col2:
+
+        factor_percentage = st.number_input(
+            f"Percentage *",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(default_percentage),
+            step=0.5,
+            format="%.2f",
+            key=f"pricing_factor_percentage_{factor_index}"
+        )
+
+
+    pricing_factor_rows.append(
+        {
+            "Layer":
+                factor_index,
+
+            "Name":
+                factor_name.strip(),
+
+            "Percentage":
+                float(factor_percentage)
+        }
     )
 
 
-st.write("**Selected Solution:**")
+# ============================================================
+# VALIDATE PRICING
+# ============================================================
 
-st.write(selected_solution)
+pricing_inputs_complete = all(
+    row["Name"]
+    and row["Percentage"] >= 0
+    for row in pricing_factor_rows
+)
+
+
+if not pricing_inputs_complete:
+
+    st.error(
+        "Every pricing layer must have "
+        "a name and percentage."
+    )
+
+    st.stop()
 
 
 # ============================================================
-# EXPORT
+# CALCULATE COST → PRICE
 # ============================================================
 
-st.header("7️⃣ Export BOM")
+pricing_build_up_rows = []
 
 
-# Create Excel export
-excel_file = create_excel_file(
-    bom_df,
-    summary_df
+running_amount = total_cost
+
+
+for row in pricing_factor_rows:
+
+    layer = row["Layer"]
+
+    name = row["Name"]
+
+    percentage = row["Percentage"]
+
+
+    # --------------------------------------------------------
+    # Layer 1 = baseline
+    # --------------------------------------------------------
+
+    if layer == 1:
+
+        previous_amount_display = (
+            format_price(total_cost)
+        )
+
+        added_amount_display = "—"
+
+        cumulative_display = (
+            format_price(total_cost)
+        )
+
+        running_amount = total_cost
+
+
+    # --------------------------------------------------------
+    # Remaining layers
+    # --------------------------------------------------------
+
+    else:
+
+        previous_amount = running_amount
+
+
+        added_amount = (
+            running_amount
+            * (
+                percentage
+                / 100.0
+            )
+        )
+
+
+        running_amount = (
+            running_amount
+            + added_amount
+        )
+
+
+        previous_amount_display = (
+            format_price(
+                previous_amount
+            )
+        )
+
+
+        added_amount_display = (
+            f"+{percentage:.2f}% = "
+            f"{format_price(added_amount)}"
+        )
+
+
+        cumulative_display = (
+            format_price(
+                running_amount
+            )
+        )
+
+
+    pricing_build_up_rows.append(
+        {
+            "Layer":
+                layer,
+
+            "Name":
+                name,
+
+            "Percentage Added":
+                (
+                    "Baseline"
+                    if layer == 1
+                    else f"{percentage:.2f}%"
+                ),
+
+            "Previous Amount":
+                previous_amount_display,
+
+            "Added Amount":
+                added_amount_display,
+
+            "Cumulative Price":
+                cumulative_display
+        }
+    )
+
+
+pricing_build_up_df = pd.DataFrame(
+    pricing_build_up_rows
+)
+
+
+# ============================================================
+# DISPLAY PRICE BUILD-UP
+# ============================================================
+
+st.subheader(
+    "📈 Price Build-up"
+)
+
+
+st.dataframe(
+    pricing_build_up_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# FINAL SELLING PRICE
+# ============================================================
+
+selling_price = running_amount
+
+
+st.subheader(
+    "🏷️ Final Selling Price"
+)
+
+
+st.success(
+    f"# {format_price(selling_price)}"
+)
+
+
+# ============================================================
+# PRICE CALCULATION DETAILS
+# ============================================================
+
+st.subheader(
+    "🧮 Pricing Calculation"
+)
+
+
+pricing_detail_rows = []
+
+
+for row in pricing_factor_rows:
+
+    layer = row["Layer"]
+
+    percentage = row["Percentage"]
+
+    name = row["Name"]
+
+
+    if layer == 1:
+
+        previous = total_cost
+
+        added = 0
+
+        cumulative = total_cost
+
+    else:
+
+        # Recalculate for clean numerical table
+        pass
+
+
+running_numeric = total_cost
+
+
+for row in pricing_factor_rows:
+
+    layer = row["Layer"]
+
+    name = row["Name"]
+
+    percentage = row["Percentage"]
+
+
+    if layer == 1:
+
+        previous = total_cost
+
+        added = 0
+
+        cumulative = total_cost
+
+    else:
+
+        previous = running_numeric
+
+        added = (
+            previous
+            * percentage
+            / 100
+        )
+
+        cumulative = (
+            previous
+            + added
+        )
+
+        running_numeric = cumulative
+
+
+    pricing_detail_rows.append(
+        {
+            "Layer":
+                layer,
+
+            "Pricing Factor":
+                name,
+
+            "Percentage":
+                (
+                    "Baseline"
+                    if layer == 1
+                    else f"{percentage:.2f}%"
+                ),
+
+            "Previous Amount":
+                format_price(previous),
+
+            "Added Amount":
+                (
+                    "—"
+                    if layer == 1
+                    else format_price(added)
+                ),
+
+            "Cumulative Price":
+                format_price(cumulative)
+        }
+    )
+
+
+pricing_detail_df = pd.DataFrame(
+    pricing_detail_rows
+)
+
+
+st.dataframe(
+    pricing_detail_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# STEP 6 — FINAL BOM
+# ============================================================
+
+st.header(
+    "6️⃣ Final BOM"
+)
+
+
+final_bom_rows = []
+
+
+# ============================================================
+# BASE BOM
+# ============================================================
+
+for item in selected_solution_items:
+
+    final_bom_rows.append(
+        {
+            "Category":
+                "Base Solution",
+
+            "Part Number":
+                item["Part Number"],
+
+            "Description":
+                item["Description"],
+
+            "Quantity":
+                item["Qty"],
+
+            "UOM":
+                item["UOM"],
+
+            "Unit Price":
+                item["Unit Price"],
+
+            "Amount":
+                item["Amount"]
+        }
+    )
+
+
+# ============================================================
+# OPTIONAL BOM
+# ============================================================
+
+for item in selected_optional_items:
+
+    final_bom_rows.append(
+        {
+            "Category":
+                "Optional",
+
+            "Part Number":
+                item["Part Number"],
+
+            "Description":
+                item["Description"],
+
+            "Quantity":
+                item["Quantity"],
+
+            "UOM":
+                item["UOM"],
+
+            "Unit Price":
+                item["Unit Price"],
+
+            "Amount":
+                item["Amount"]
+        }
+    )
+
+
+# ============================================================
+# PDU BOM
+# ============================================================
+
+if selected_pdu:
+
+    final_bom_rows.append(
+        {
+            "Category":
+                "PDU",
+
+            "Part Number":
+                selected_pdu["Part Number"],
+
+            "Description":
+                selected_pdu["Description"],
+
+            "Quantity":
+                pdu_quantity,
+
+            "UOM":
+                "EA",
+
+            "Unit Price":
+                selected_pdu["Unit Price"],
+
+            "Amount":
+                pdu_amount
+        }
+    )
+
+
+bom_df = pd.DataFrame(
+    final_bom_rows
+)
+
+
+# ============================================================
+# DISPLAY BOM
+# ============================================================
+
+display_bom_df = bom_df.copy()
+
+
+display_bom_df[
+    "Unit Price"
+] = display_bom_df[
+    "Unit Price"
+].apply(format_price)
+
+
+display_bom_df[
+    "Amount"
+] = display_bom_df[
+    "Amount"
+].apply(format_price)
+
+
+st.dataframe(
+    display_bom_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# STEP 7 — COMMERCIAL SUMMARY
+# ============================================================
+
+st.header(
+    "7️⃣ Final BOM & Commercial Summary"
+)
+
+
+commercial_rows = [
+
+    {
+        "Part Number":
+            "—",
+
+        "Description":
+            selected_solution,
+
+        "Quantity":
+            1,
+
+        "Unit Cost":
+            format_price(base_cost),
+
+        "Amount":
+            format_price(base_cost)
+    }
+]
+
+
+for item in selected_optional_items:
+
+    commercial_rows.append(
+        {
+            "Part Number":
+                item["Part Number"],
+
+            "Description":
+                item["Description"],
+
+            "Quantity":
+                item["Quantity"],
+
+            "Unit Cost":
+                format_price(
+                    item["Unit Price"]
+                ),
+
+            "Amount":
+                format_price(
+                    item["Amount"]
+                )
+        }
+    )
+
+
+if selected_pdu:
+
+    commercial_rows.append(
+        {
+            "Part Number":
+                selected_pdu["Part Number"],
+
+            "Description":
+                selected_pdu["Description"],
+
+            "Quantity":
+                pdu_quantity,
+
+            "Unit Cost":
+                format_price(
+                    selected_pdu["Unit Price"]
+                ),
+
+            "Amount":
+                format_price(
+                    pdu_amount
+                )
+        }
+    )
+
+
+commercial_df = pd.DataFrame(
+    commercial_rows
+)
+
+
+st.dataframe(
+    commercial_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# STEP 8 — SUMMARY
+# ============================================================
+
+st.header(
+    "8️⃣ Project Summary"
+)
+
+
+summary_rows_ui = [
+
+    {
+        "Metric":
+            "Customer Name",
+
+        "Value":
+            customer_name or "—"
+    },
+
+    {
+        "Metric":
+            "Customer Place",
+
+        "Value":
+            customer_place or "—"
+    },
+
+    {
+        "Metric":
+            "Problem / Requirement",
+
+        "Value":
+            problem_statement or "—"
+    },
+
+    {
+        "Metric":
+            "Proposed Solution",
+
+        "Value":
+            proposed_solution or "—"
+    },
+
+    {
+        "Metric":
+            "Selected Configuration",
+
+        "Value":
+            selected_solution
+    },
+
+    {
+        "Metric":
+            "Base Solution Cost",
+
+        "Value":
+            format_price(base_cost)
+    },
+
+    {
+        "Metric":
+            "Optional Components Cost",
+
+        "Value":
+            format_price(optional_total)
+    },
+
+    {
+        "Metric":
+            "PDU Cost",
+
+        "Value":
+            format_price(pdu_amount)
+    },
+
+    {
+        "Metric":
+            "TOTAL COST",
+
+        "Value":
+            format_price(total_cost)
+    },
+
+    {
+        "Metric":
+            "FINAL SELLING PRICE",
+
+        "Value":
+            format_price(selling_price)
+    }
+]
+
+
+summary_df = pd.DataFrame(
+    summary_rows_ui
+)
+
+
+st.dataframe(
+    summary_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# STEP 9 — EXCEL EXPORT
+# ============================================================
+
+st.header(
+    "9️⃣ Excel Export"
+)
+
+
+# ============================================================
+# CUSTOMER DETAILS
+# ============================================================
+
+customer_details_df = pd.DataFrame(
+    [
+        {
+            "Field":
+                "Customer Name",
+
+            "Value":
+                customer_name
+        },
+
+        {
+            "Field":
+                "Customer Place",
+
+            "Value":
+                customer_place
+        },
+
+        {
+            "Field":
+                "MDC Configuration",
+
+            "Value":
+                selected_solution
+        },
+
+        {
+            "Field":
+                "Problem / Requirement",
+
+            "Value":
+                problem_statement
+        },
+
+        {
+            "Field":
+                "Proposed Solution",
+
+            "Value":
+                proposed_solution
+        }
+    ]
+)
+
+
+# ============================================================
+# BOM WITHOUT PRICE
+# ============================================================
+
+bom_without_price_df = bom_df[
+    [
+        "Category",
+        "Part Number",
+        "Description",
+        "Quantity",
+        "UOM"
+    ]
+].copy()
+
+
+# ============================================================
+# BOM WITH PRICE
+# ============================================================
+
+bom_with_price_df = bom_df.copy()
+
+
+# ============================================================
+# OPTIONAL EXPORT
+# ============================================================
+
+if selected_optional_items:
+
+    export_optional_df = pd.DataFrame(
+        [
+            {
+                "Part Number":
+                    item["Part Number"],
+
+                "Component":
+                    item["Description"],
+
+                "Quantity":
+                    item["Quantity"],
+
+                "Unit Cost":
+                    format_price(
+                        item["Unit Price"]
+                    ),
+
+                "Amount":
+                    format_price(
+                        item["Amount"]
+                    )
+            }
+
+            for item in selected_optional_items
+        ]
+    )
+
+else:
+
+    export_optional_df = pd.DataFrame(
+        columns=[
+            "Part Number",
+            "Component",
+            "Quantity",
+            "Unit Cost",
+            "Amount"
+        ]
+    )
+
+
+# ============================================================
+# PDU EXPORT
+# ============================================================
+
+if selected_pdu:
+
+    pdu_export_df = pd.DataFrame(
+        [
+            {
+                "Part Number":
+                    selected_pdu["Part Number"],
+
+                "Description":
+                    selected_pdu["Description"],
+
+                "PDU Type":
+                    selected_pdu["Type"],
+
+                "C13":
+                    selected_pdu["C13"],
+
+                "C19":
+                    selected_pdu["C19"],
+
+                "Quantity":
+                    pdu_quantity,
+
+                "Unit Cost":
+                    format_price(
+                        selected_pdu["Unit Price"]
+                    ),
+
+                "Amount":
+                    format_price(
+                        pdu_amount
+                    )
+            }
+        ]
+    )
+
+else:
+
+    pdu_export_df = pd.DataFrame(
+        columns=[
+            "Part Number",
+            "Description",
+            "PDU Type",
+            "C13",
+            "C19",
+            "Quantity",
+            "Unit Cost",
+            "Amount"
+        ]
+    )
+
+
+# ============================================================
+# PRICE SUMMARY EXPORT
+# ============================================================
+
+price_summary_rows = [
+
+    {
+        "Section":
+            "Customer",
+
+        "Item":
+            "Customer Name",
+
+        "Value":
+            customer_name
+    },
+
+    {
+        "Section":
+            "Customer",
+
+        "Item":
+            "Customer Place",
+
+        "Value":
+            customer_place
+    },
+
+    {
+        "Section":
+            "Project",
+
+        "Item":
+            "Problem / Requirement",
+
+        "Value":
+            problem_statement
+    },
+
+    {
+        "Section":
+            "Project",
+
+        "Item":
+            "Proposed Solution",
+
+        "Value":
+            proposed_solution
+    },
+
+    {
+        "Section":
+            "Configuration",
+
+        "Item":
+            "Selected Solution",
+
+        "Value":
+            selected_solution
+    },
+
+    {
+        "Section":
+            "Cost",
+
+        "Item":
+            "Base Solution Cost",
+
+        "Value":
+            format_price(base_cost)
+    },
+
+    {
+        "Section":
+            "Cost",
+
+        "Item":
+            "Optional Components Cost",
+
+        "Value":
+            format_price(optional_total)
+    },
+
+    {
+        "Section":
+            "Cost",
+
+        "Item":
+            "PDU Cost",
+
+        "Value":
+            format_price(pdu_amount)
+    },
+
+    {
+        "Section":
+            "Cost",
+
+        "Item":
+            "TOTAL COST",
+
+        "Value":
+            format_price(total_cost)
+    }
+]
+
+
+# ============================================================
+# ADD PRICE BUILD-UP
+# ============================================================
+
+for row in pricing_build_up_rows:
+
+    price_summary_rows.append(
+        {
+            "Section":
+                "Cost → Price",
+
+            "Item":
+                f"Layer {row['Layer']} — "
+                f"{row['Name']}",
+
+            "Value":
+                (
+                    f"{row['Percentage Added']} | "
+                    f"Previous: {row['Previous Amount']} | "
+                    f"Added: {row['Added Amount']} | "
+                    f"Cumulative: {row['Cumulative Price']}"
+                )
+        }
+    )
+
+
+price_summary_rows.append(
+    {
+        "Section":
+            "Price",
+
+        "Item":
+            "FINAL SELLING PRICE",
+
+        "Value":
+            format_price(
+                selling_price
+            )
+    }
+)
+
+
+price_summary_df = pd.DataFrame(
+    price_summary_rows
+)
+
+
+# ============================================================
+# PRICING FACTORS EXPORT
+# ============================================================
+
+pricing_factors_export_df = pd.DataFrame(
+    pricing_factor_rows
+)
+
+
+pricing_factors_export_df[
+    "Percentage Added"
+] = pricing_factors_export_df[
+    "Percentage"
+].map(
+    lambda x:
+        "Baseline"
+        if x == 0
+        else f"{x:.2f}%"
+)
+
+
+pricing_factors_export_df = (
+    pricing_factors_export_df[
+        [
+            "Layer",
+            "Name",
+            "Percentage Added"
+        ]
+    ]
+)
+
+
+# ============================================================
+# FINAL COST SUMMARY EXPORT
+# ============================================================
+
+cost_export_df = cost_df.copy()
+
+
+# ============================================================
+# PRICE BUILD-UP NUMERICAL EXPORT
+# ============================================================
+
+price_build_up_export_df = pd.DataFrame(
+    pricing_detail_rows
+)
+
+
+# ============================================================
+# EXCEL FILE — WITHOUT PRICE
+# ============================================================
+
+excel_without_price = create_excel_file(
+    {
+        "Customer Details":
+            customer_details_df,
+
+        "BOM":
+            bom_without_price_df
+    }
+)
+
+
+# ============================================================
+# EXCEL FILE — WITH PRICE
+# ============================================================
+
+excel_with_price = create_excel_file(
+    {
+        "Customer Details":
+            customer_details_df,
+
+        "BOM With Price":
+            bom_with_price_df,
+
+        "Optional Components":
+            export_optional_df,
+
+        "PDU":
+            pdu_export_df,
+
+        "Cost Summary":
+            cost_export_df,
+
+        "Price Build-up":
+            price_build_up_export_df,
+
+        "Pricing Factors":
+            pricing_factors_export_df,
+
+        "Price Summary":
+            price_summary_df
+    }
+)
+
+
+# ============================================================
+# DOWNLOAD WITHOUT PRICE
+# ============================================================
+
+st.subheader(
+    "📥 Download BOM"
 )
 
 
 st.download_button(
-    label="📥 Download BOM Excel",
-    data=excel_file,
-    file_name="MDC_BOM_Generated.xlsx",
+    label="📥 Download BOM — Without Price",
+
+    data=excel_without_price,
+
+    file_name=(
+        "MDC_BOM_Without_Price.xlsx"
+    ),
+
     mime=(
         "application/vnd.openxmlformats-officedocument."
         "spreadsheetml.sheet"
-    )
+    ),
+
+    key="download_without_price"
 )
 
 
 # ============================================================
-# DATA SOURCE INFORMATION
+# DOWNLOAD WITH PRICE
 # ============================================================
 
-with st.expander("📊 Excel Data Source"):
+st.download_button(
+    label="💰 Download BOM — With Price",
+
+    data=excel_with_price,
+
+    file_name=(
+        "MDC_BOM_With_Price.xlsx"
+    ),
+
+    mime=(
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sheet"
+    ),
+
+    key="download_with_price"
+)
+
+
+# ============================================================
+# DATA SOURCE
+# ============================================================
+
+with st.expander(
+    "📊 Excel Data Source"
+):
 
     st.write(
-        f"**Workbook:** `{EXCEL_FILE}`"
+        f"**Workbook:** {EXCEL_FILE}"
     )
 
     st.write(
-        f"**Sheet:** `{SHEET_NAME}`"
+        f"**Sheet:** {SHEET_NAME}"
     )
 
     st.write(
-        f"**Detected Solutions:** {len(solutions)}"
+        f"**Solutions detected:** "
+        f"{len(solutions)}"
     )
 
     st.write(
-        f"**Optional Items:** {len(optional_items)}"
+        f"**Optional items detected:** "
+        f"{len(optional_items)}"
     )
 
     st.write(
-        f"**PDU Items:** {len(pdu_items)}"
+        f"**PDU items detected:** "
+        f"{len(pdu_items)}"
     )
 
 
@@ -990,5 +2582,7 @@ with st.expander("📊 Excel Data Source"):
 st.divider()
 
 st.caption(
-    "MDC Rack BOM Generator • Data extracted from the supplied Excel configuration"
+    "MDC Configuration & BOM Generator | "
+    "Excel-driven BOM + Quantity-based Optional/PDU Cost + "
+    "Editable Cost-to-Price Build-up"
 )
